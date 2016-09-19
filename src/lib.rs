@@ -3,7 +3,7 @@ extern crate pantomime_parser;
 #[macro_use]
 extern crate log;
 
-use interpreter::{Interpreter, InterpreterError};
+use interpreter::{Interpreter, InterpreterAction, InterpreterError};
 use loader::BaseClassLoader;
 
 use pantomime_parser::ParserError;
@@ -49,11 +49,22 @@ impl VirtualMachine {
         let main_method = main_class.maybe_resolve_main_method()
             .expect("Provided main class does not have a main method!");
 
-        let mut interpreter = Interpreter::new(main_method);
+        let mut interpreter = Interpreter::new(main_class, main_method);
 
         loop {
             match interpreter.step() {
-                Ok(_) => {}
+                Ok(action) => {
+                    match action {
+                        InterpreterAction::Continue => (),
+                        InterpreterAction::EndOfMethod => break,
+                        InterpreterAction::InvokeStaticMethod { class_name, name, descriptor } => {
+                            debug!("Invoking static method: {}#{}({})",
+                                   class_name.to_string(),
+                                   name.to_string(),
+                                   descriptor.to_string());
+                        }
+                    }
+                }
                 Err(error) => {
                     Self::handle_interpreter_error(error);
                 }
@@ -63,6 +74,15 @@ impl VirtualMachine {
 
     fn handle_interpreter_error(error: InterpreterError) {
         match error {
+            InterpreterError::Parser(val) => {
+                panic!("Parser error: {:?}", val);
+            }
+            InterpreterError::CodeIndexOutOfBounds(val) => {
+                panic!("Code index out of bounds: {:?}", val);
+            }
+            InterpreterError::UnexpectedConstantPoolItem(item) => {
+                panic!("Unexpected ConstantPoolItem: {}", item);
+            }
             InterpreterError::UnknownOpcode(val) => {
                 panic!("Unknown opcode: {}", val);
             }
