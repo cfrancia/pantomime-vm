@@ -5,3 +5,4 @@ authors = ["cfrancia <cfrancia@users.noreply.github.com>"]
 
 [dependencies]
 pantomime-parser = { git = "https://github.com/cfrancia/pantomime-parser" }
+log = "0.3.6"
