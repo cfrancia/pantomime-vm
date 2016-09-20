@@ -40,6 +40,7 @@ pub enum InterpreterAction {
         class_name: Rc<Utf8Info>,
         name: Rc<Utf8Info>,
         descriptor: Rc<Utf8Info>,
+        args: Vec<JavaType>,
     },
     Continue,
     EndOfMethod,
@@ -59,7 +60,8 @@ impl From<ParserError> for InterpreterError {
     }
 }
 
-enum JavaType {
+#[derive(Debug)]
+pub enum JavaType {
     String { index: U2 },
 }
 
@@ -108,6 +110,8 @@ impl Interpreter {
 
                     self.stack.push(stack_val);
                 }
+                // return
+                177 => return Ok(InterpreterAction::EndOfMethod),
                 // invokestatic
                 184 => {
                     get_and_increment!(current_position);
@@ -124,12 +128,21 @@ impl Interpreter {
                                 10 => {
                                     let method = try!(Resolver::resolve_method_info(val,
                                                                                     constant_pool));
+
+                                    // TODO: Actually work out the number of arguments
+                                    let mut args = vec![];
+                                    args.push(self.stack
+                                        .pop()
+                                        .expect("Should have already had an argument on the \
+                                                 stack"));
+
                                     self.code_position = current_position;
 
                                     return Ok(InterpreterAction::InvokeStaticMethod {
                                         class_name: method.class_name,
                                         name: method.name,
                                         descriptor: method.descriptor,
+                                        args: args,
                                     });
                                 }
                                 _ => unimplemented!(),

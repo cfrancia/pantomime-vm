@@ -3,12 +3,14 @@ extern crate pantomime_parser;
 #[macro_use]
 extern crate log;
 
-use interpreter::{Interpreter, InterpreterAction, InterpreterError};
+use interpreter::{Interpreter, InterpreterAction, InterpreterError, JavaType};
 use loader::BaseClassLoader;
 
-use pantomime_parser::ParserError;
+use pantomime_parser::{ClassFile, ParserError};
+use pantomime_parser::components::{AccessFlags, ConstantPoolItem, Method};
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 mod interpreter;
 mod loader;
@@ -49,19 +51,36 @@ impl VirtualMachine {
         let main_method = main_class.maybe_resolve_main_method()
             .expect("Provided main class does not have a main method!");
 
-        let mut interpreter = Interpreter::new(main_class, main_method);
+        let mut stack = vec![];
+        stack.push(Interpreter::new(main_class, main_method));
 
         loop {
+            let mut interpreter = stack.pop().expect("The stack is unexpectedly empty!");
+
             match interpreter.step() {
                 Ok(action) => {
                     match action {
-                        InterpreterAction::Continue => (),
-                        InterpreterAction::EndOfMethod => break,
-                        InterpreterAction::InvokeStaticMethod { class_name, name, descriptor } => {
+                        InterpreterAction::Continue => stack.push(interpreter),
+                        InterpreterAction::EndOfMethod => {
+                            debug!("Reached end of method");
+                            break;
+                        }
+                        InterpreterAction::InvokeStaticMethod { class_name,
+                                                                name,
+                                                                descriptor,
+                                                                args } => {
                             debug!("Invoking static method: {}#{}({})",
                                    class_name.to_string(),
                                    name.to_string(),
                                    descriptor.to_string());
+
+                            let class =
+                                self.loader.load_class(&class_name).expect("Unable to find class");
+                            let method = class.maybe_resolve_method(&**name)
+                                .expect("Unable to find method");
+
+                            stack.push(interpreter);
+                            Self::call_static_method(class, method, args, &stack);
                         }
                     }
                 }
@@ -86,6 +105,38 @@ impl VirtualMachine {
             InterpreterError::UnknownOpcode(val) => {
                 panic!("Unknown opcode: {}", val);
             }
+        }
+    }
+
+    fn call_static_method(class: Rc<ClassFile>,
+                          method: Rc<Method>,
+                          args: Vec<JavaType>,
+                          stack: &Vec<Interpreter>) {
+        let mut args = args;
+        let access_flags = &method.access_flags;
+
+        if AccessFlags::is_native(*access_flags) {
+            debug!("Method is native");
+
+            // TODO: Don't always assume it's going to be native println
+            // with a single string argument
+            let value = match args.pop().unwrap() {
+                JavaType::String { index } => {
+                    let constant_pool = &class.constant_pool;
+
+                    let string_info = ConstantPoolItem::retrieve_string_info(index as usize,
+                                                                             &constant_pool)
+                        .unwrap();
+                    let utf8_info =
+                        ConstantPoolItem::retrieve_utf8_info(string_info.string_index as usize,
+                                                             &constant_pool)
+                            .unwrap();
+
+                    utf8_info.to_string()
+                }
+            };
+
+            println!("OUT: {}", value);
         }
     }
 }

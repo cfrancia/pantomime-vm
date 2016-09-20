@@ -25,14 +25,17 @@ impl BaseClassLoader {
     }
 
     pub fn load_class(&mut self, name: &str) -> VirtualMachineResult<Rc<ClassFile>> {
-        for path in &self.classfile_paths {
-            let file = File::open(path).unwrap();
+        // TODO: This is a pretty bad way to not load classes multiple times
+        if !self.loaded_classes.contains_key(name) {
+            for path in &self.classfile_paths {
+                let file = File::open(path).unwrap();
 
-            let classfile = try!(ClassFile::from(file));
-            let classname = try!(classfile.classname()).to_string();
+                let classfile = try!(ClassFile::from(file));
+                let classname = try!(classfile.classname()).to_string();
 
-            debug!("Loading class: {}", classname);
-            self.loaded_classes.insert(classname, Rc::new(classfile));
+                debug!("Loading class: {}", classname);
+                self.loaded_classes.insert(classname, Rc::new(classfile));
+            }
         }
 
         debug!("Resolving class: {}", name);
