@@ -52,7 +52,7 @@ impl VirtualMachine {
             .expect("Provided main class does not have a main method!");
 
         let mut stack = vec![];
-        stack.push(Interpreter::new(main_class, main_method));
+        stack.push(Interpreter::new(main_class, main_method, vec![]));
 
         loop {
             let mut interpreter = stack.pop().expect("The stack is unexpectedly empty!");
@@ -80,7 +80,7 @@ impl VirtualMachine {
                                 .expect("Unable to find method");
 
                             stack.push(interpreter);
-                            Self::call_static_method(class, method, args, &stack);
+                            Self::call_static_method(class, method, args, &mut stack);
                         }
                     }
                 }
@@ -111,32 +111,37 @@ impl VirtualMachine {
     fn call_static_method(class: Rc<ClassFile>,
                           method: Rc<Method>,
                           args: Vec<JavaType>,
-                          stack: &Vec<Interpreter>) {
+                          stack: &mut Vec<Interpreter>) {
         let mut args = args;
-        let access_flags = &method.access_flags;
+        {
+            let access_flags = &method.access_flags;
 
-        if AccessFlags::is_native(*access_flags) {
-            debug!("Method is native");
+            if AccessFlags::is_native(*access_flags) {
+                debug!("Method is native");
 
-            // TODO: Don't always assume it's going to be native println
-            // with a single string argument
-            let value = match args.pop().unwrap() {
-                JavaType::String { index } => {
-                    let constant_pool = &class.constant_pool;
+                // TODO: Don't always assume it's going to be native println
+                // with a single string argument
+                let value = match args.pop().unwrap() {
+                    JavaType::String { index } => {
+                        let constant_pool = &class.constant_pool;
 
-                    let string_info = ConstantPoolItem::retrieve_string_info(index as usize,
-                                                                             &constant_pool)
-                        .unwrap();
-                    let utf8_info =
-                        ConstantPoolItem::retrieve_utf8_info(string_info.string_index as usize,
-                                                             &constant_pool)
+                        let string_info = ConstantPoolItem::retrieve_string_info(index as usize,
+                                                                                 &constant_pool)
                             .unwrap();
+                        let utf8_info =
+                            ConstantPoolItem::retrieve_utf8_info(string_info.string_index as usize,
+                                                                 &constant_pool)
+                                .unwrap();
 
-                    utf8_info.to_string()
-                }
-            };
+                        utf8_info.to_string()
+                    }
+                };
 
-            println!("OUT: {}", value);
+                println!("OUT: {}", value);
+                return;
+            }
         }
+
+        stack.push(Interpreter::new(class, method, args));
     }
 }

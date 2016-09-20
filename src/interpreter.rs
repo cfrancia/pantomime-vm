@@ -70,10 +70,14 @@ pub struct Interpreter {
     code_attribute: Rc<CodeAttribute>,
     code_position: usize,
     stack: Vec<JavaType>,
+    variables: Vec<JavaType>,
 }
 
 impl Interpreter {
-    pub fn new(classfile: Rc<ClassFile>, method: Rc<Method>) -> Interpreter {
+    pub fn new(classfile: Rc<ClassFile>,
+               method: Rc<Method>,
+               variables: Vec<JavaType>)
+               -> Interpreter {
         debug!("Interpreting method: {}", method.name.to_string());
 
         let code_attribute = Self::resolve_code_attribute(&method.attributes)
@@ -84,6 +88,7 @@ impl Interpreter {
             code_attribute: code_attribute,
             code_position: 0,
             stack: vec![],
+            variables: variables,
         }
     }
 
@@ -92,10 +97,10 @@ impl Interpreter {
         let constant_pool = &self.classfile.constant_pool;
 
         if let Some(opcode) = self.code_attribute.code.get(current_position) {
+            get_and_increment!(current_position);
             match *opcode {
                 // ldc
                 18 => {
-                    get_and_increment!(current_position);
                     let index =
                         *retrieve_and_advance!(current_position, self.code_attribute.code) as U2;
 
@@ -110,11 +115,15 @@ impl Interpreter {
 
                     self.stack.push(stack_val);
                 }
+                // aload_0
+                42 => {
+                    let var = self.variables.remove(0);
+                    self.stack.push(var);
+                }
                 // return
                 177 => return Ok(InterpreterAction::EndOfMethod),
                 // invokestatic
                 184 => {
-                    get_and_increment!(current_position);
                     let index_one =
                         *retrieve_and_advance!(current_position, self.code_attribute.code) as U2;
                     let index_two =
