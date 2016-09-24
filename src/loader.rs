@@ -28,11 +28,14 @@ impl BaseClassLoader {
         for path in &self.classfile_paths {
             let file = File::open(path).unwrap();
 
-            let classfile = ClassFile::from(file).expect(&format!("Unable to load class from: {:?}", path));
-            let classname = classfile.classname().expect(&format!("Unable to retrieve classname from: {:?}", path)).to_string();
+            let classfile = ClassFile::from(file)
+                .expect(&format!("Unable to load class from: {:?}", path));
+            let classname = classfile.classname()
+                .expect(&format!("Unable to retrieve classname from: {:?}", path))
+                .to_string();
 
             if self.loaded_classes.contains_key(&classname) {
-                continue
+                continue;
             }
 
             debug!("Loading class: {}", classname);

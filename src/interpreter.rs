@@ -7,28 +7,36 @@ use pantomime_parser::components::{Attribute, CodeAttribute, ConstantPoolItem,
 
 use std::rc::Rc;
 
-macro_rules! get_and_increment {
-    ($var:ident) => {
+macro_rules! retrieve_and_advance {
+    ($index:ident, $vec:ident$(.$additional_ident:ident)*) => {
         {
-            let temp_var = $var;
-            $var += 1;
+            let temp_var = match $vec$(.$additional_ident)*.get($index.get_and_increment()) {
+                Some(val) => val,
+                None => return Err(InterpreterError::CodeIndexOutOfBounds($index.current())),
+            };
 
-            temp_var
+            *temp_var as U2
         }
     }
 }
 
-macro_rules! retrieve_and_advance {
-    ($index:ident, $vec:ident$(.$additional_ident:ident)*) => {
-        {
-            let temp_index = get_and_increment!($index);
-            let temp_var = match $vec$(.$additional_ident)*.get(temp_index) {
-                Some(val) => val,
-                None => return Err(InterpreterError::CodeIndexOutOfBounds(temp_index)),
-            };
+struct Codepoint {
+    position: usize,
+}
 
-            temp_var
-        }
+impl Codepoint {
+    pub fn new() -> Codepoint {
+        Codepoint { position: 0 }
+    }
+
+    pub fn get_and_increment(&mut self) -> usize {
+        let current_position = self.position;
+        self.position += 1;
+        current_position
+    }
+
+    pub fn current(&self) -> usize {
+        self.position as usize
     }
 }
 
@@ -68,7 +76,7 @@ pub enum JavaType {
 pub struct Interpreter {
     classfile: Rc<ClassFile>,
     code_attribute: Rc<CodeAttribute>,
-    code_position: usize,
+    code_position: Codepoint,
     stack: Vec<JavaType>,
     variables: Vec<JavaType>,
 }
@@ -86,23 +94,23 @@ impl Interpreter {
         Interpreter {
             classfile: classfile,
             code_attribute: code_attribute,
-            code_position: 0,
+            code_position: Codepoint::new(),
             stack: vec![],
             variables: variables,
         }
     }
 
     pub fn step(&mut self) -> InterpreterResult<InterpreterAction> {
-        let mut current_position = self.code_position;
         let constant_pool = &self.classfile.constant_pool;
+        let ref mut code_position = self.code_position;
 
-        if let Some(opcode) = self.code_attribute.code.get(current_position) {
-            get_and_increment!(current_position);
+        if let Some(opcode) = self.code_attribute.code.get(code_position.current()) {
+            code_position.get_and_increment();
+
             match *opcode {
                 // ldc
                 18 => {
-                    let index =
-                        *retrieve_and_advance!(current_position, self.code_attribute.code) as U2;
+                    let index = retrieve_and_advance!(code_position, self.code_attribute.code);
 
                     let stack_val = match try!(Self::retrieve_constant_pool_item(index,
                                                                                  constant_pool)) {
@@ -124,26 +132,20 @@ impl Interpreter {
                 177 => return Ok(InterpreterAction::EndOfMethod),
                 // invokestatic
                 184 => {
-                    let index_one =
-                        *retrieve_and_advance!(current_position, self.code_attribute.code) as U2;
-                    let index_two =
-                        *retrieve_and_advance!(current_position, self.code_attribute.code) as U2;
+                    let index_one = retrieve_and_advance!(code_position, self.code_attribute.code);
+                    let index_two = retrieve_and_advance!(code_position, self.code_attribute.code);
 
                     let index = (index_one << 8) | index_two;
 
                     match try!(Self::retrieve_constant_pool_item(index, constant_pool)) {
                         &ConstantPoolItem::Method(ref val) => {
-                            let method = try!(Resolver::resolve_method_info(val,
-                                                                            constant_pool));
+                            let method = try!(Resolver::resolve_method_info(val, constant_pool));
 
                             // TODO: Actually work out the number of arguments
                             let mut args = vec![];
                             args.push(self.stack
-                                      .pop()
-                                      .expect("Should have already had an argument on the \
-                                                 stack"));
-
-                            self.code_position = current_position;
+                                .pop()
+                                .expect("Should have already had an argument on the stack"));
 
                             return Ok(InterpreterAction::InvokeStaticMethod {
                                 class_name: method.class_name,
@@ -159,7 +161,6 @@ impl Interpreter {
                 val @ _ => return Err(InterpreterError::UnknownOpcode(val)),
             }
 
-            self.code_position = current_position;
             return Ok(InterpreterAction::Continue);
         }
 
@@ -216,9 +217,8 @@ impl Resolver {
                                                                    constant_pool));
         let name = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.name_index,
                                                              constant_pool));
-        let descriptor =
-            try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.descriptor_index,
-                                                      constant_pool));
+        let descriptor = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.descriptor_index,
+                                                                   constant_pool));
 
         Ok(InitializedMethodInfo {
             class_name: class_name,

@@ -76,8 +76,9 @@ impl VirtualMachine {
                                    name.to_string(),
                                    descriptor.to_string());
 
-                            let class =
-                                self.loader.resolve_class(&class_name).expect("Unable to find class");
+                            let class = self.loader
+                                .resolve_class(&class_name)
+                                .expect("Unable to find class");
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
