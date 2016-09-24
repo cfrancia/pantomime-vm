@@ -81,17 +81,40 @@ impl From<ParserError> for StepError {
 #[derive(Debug)]
 pub enum JavaType {
     String { index: U2 },
-    Int { value: U4 },
-    Byte { value: U1 },
+    Byte { value: u8 },
+    Int { value: u32 },
+    Long { value: u64 },
+    Filler,
     Empty,
 }
+
+macro_rules! generate_javatype_pop_method {
+    ($variant_name:ident, $return_type:ident, $method_name:ident) => {
+        pub fn $method_name(item_vec: &mut Vec<JavaType>) -> StepResult<$return_type> {
+            return match item_vec.pop() {
+                Some(item) => {
+                    match item {
+                        JavaType::$variant_name { value } => Ok(value),
+                        unexpected @ _ => {
+                            Err(StepError::UnexpectedJavaType(unexpected.to_friendly_name()))
+                        }
+                    }
+                }
+                None => Err(StepError::UnexpectedEmptyVec),
+            };
+        }
+    }
+}
+
 
 impl JavaType {
     pub fn to_friendly_name(&self) -> &'static str {
         return match self {
             &JavaType::String { .. } => "String",
-            &JavaType::Int { .. } => "Int",
             &JavaType::Byte { .. } => "Byte",
+            &JavaType::Int { .. } => "Int",
+            &JavaType::Long { .. } => "Long",
+            &JavaType::Filler { .. } => "Filler",
             &JavaType::Empty => "Empty",
         };
     }
@@ -109,19 +132,8 @@ impl JavaType {
         removed_element
     }
 
-    pub fn pop_int(item_vec: &mut Vec<JavaType>) -> StepResult<U4> {
-        return match item_vec.pop() {
-            Some(item) => {
-                match item {
-                    JavaType::Int { value } => Ok(value),
-                    unexpected @ _ => {
-                        Err(StepError::UnexpectedJavaType(unexpected.to_friendly_name()))
-                    }
-                }
-            }
-            None => Err(StepError::UnexpectedEmptyVec),
-        };
-    }
+    generate_javatype_pop_method!(Int, u32, pop_int);
+    generate_javatype_pop_method!(Long, u64, pop_long);
 }
 
 pub struct Frame {
@@ -170,7 +182,7 @@ impl Frame {
 
             match *opcode {
                 // iconst_2
-                5 => self.operand_stack.push(JavaType::Int { value : 5}),
+                5 => self.operand_stack.push(JavaType::Int { value: 5 }),
                 // iconst_5
                 8 => self.operand_stack.push(JavaType::Int { value: 5 }),
                 // bipush
@@ -195,10 +207,35 @@ impl Frame {
 
                     self.operand_stack.push(stack_val);
                 }
+                // ldc2_w
+                20 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+                    let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
+                                                                               constant_pool)) {
+                        &ConstantPoolItem::Long(ref info) => {
+                            let value: u64 = ((info.high_bytes as u64) << 32) +
+                                             info.low_bytes as u64;
+                            JavaType::Long { value: value }
+                        }
+                        item @ _ => {
+                            return Err(StepError::UnexpectedConstantPoolItem(
+                                    item.to_friendly_name()));
+                        }
+                    };
+
+                    self.operand_stack.push(stack_val);
+                    // We need to take up two spots in the operand stack
+                    self.operand_stack.push(JavaType::Filler);
+                }
                 // iload_0
                 26 => self.operand_stack.push(JavaType::take(0, &mut self.variables)),
                 // iload_1
                 27 => self.operand_stack.push(JavaType::take(1, &mut self.variables)),
+                // lload_0 (the first value is filler)
+                30 => self.operand_stack.push(JavaType::take(1, &mut self.variables)),
+                // lload_2 (the first value is filler)
+                32 => self.operand_stack.push(JavaType::take(3, &mut self.variables)),
                 // aload_0
                 42 => self.operand_stack.push(JavaType::take(0, &mut self.variables)),
                 // istore_1
@@ -221,6 +258,22 @@ impl Frame {
 
                     self.operand_stack.push(JavaType::Int { value: result });
                 }
+                // ladd | lsub | lmul | ldiv
+                97 | 101 | 105 | 109 => {
+                    let left = try!(JavaType::pop_long(&mut self.operand_stack));
+                    let right = try!(JavaType::pop_long(&mut self.operand_stack));
+
+                    let result = match *opcode {
+                        97 => left + right,
+                        101 => left - right,
+                        105 => left * right,
+                        109 => left / right,
+                        _ => unreachable!(),
+                    };
+
+                    self.operand_stack.push(JavaType::Long { value: result });
+                    self.operand_stack.push(JavaType::Filler);
+                }
                 // i2b
                 145 => {
                     let int_val = try!(JavaType::pop_int(&mut self.operand_stack));
@@ -238,6 +291,7 @@ impl Frame {
                     let method = try!(Resolver::resolve_method_info(&*method_info, constant_pool));
 
                     let argument_count = Self::determine_number_of_arguments(&method.descriptor);
+                    debug!("Passing <{}> arguments", argument_count);
 
                     let mut args = vec![];
                     for _ in 0..argument_count {
@@ -245,6 +299,7 @@ impl Frame {
                             .pop()
                             .expect("Expected value on operand stack"));
                     }
+
 
                     return Ok(StepAction::InvokeStaticMethod {
                         class_name: method.class_name,
@@ -312,14 +367,14 @@ impl Frame {
                 continue;
             }
 
-            let should_increase_count = match letter {
-                'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' => true,
+            // To make to easier when preparing to pass arguments
+            // we'll pretend that long/double arguments count as
+            // two arguments
+            argument_count += match letter {
+                'B' | 'C' | 'F' | 'I' | 'S' | 'Z' => 1,
+                'J' | 'D' => 2,
                 c @ _ => panic!("Unknown descriptor character: {}", c),
             };
-
-            if should_increase_count {
-                argument_count += 1;
-            }
         }
 
         argument_count
