@@ -10,8 +10,9 @@ use frame::{Frame, StepAction, StepError, JavaType};
 use loader::BaseClassLoader;
 
 use pantomime_parser::{ClassFile, ParserError};
-use pantomime_parser::components::{AccessFlags, Method};
+use pantomime_parser::components::{AccessFlags, Method, Utf8Info};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -34,11 +35,15 @@ impl From<ParserError> for VirtualMachineError {
 
 pub struct VirtualMachine {
     pub loader: BaseClassLoader,
+    pub data_store: CommonDataStore,
 }
 
 impl VirtualMachine {
     pub fn new() -> VirtualMachine {
-        VirtualMachine { loader: BaseClassLoader::new() }
+        VirtualMachine {
+            loader: BaseClassLoader::new(),
+            data_store: CommonDataStore::new(),
+        }
     }
 
     pub fn add_classfile_path(&mut self, path: PathBuf) {
@@ -67,11 +72,26 @@ impl VirtualMachine {
 
             let mut frame = stack.pop().unwrap();
 
-            match frame.step() {
+            match frame.step(&mut self.data_store) {
                 Ok(action) => {
                     match action {
                         StepAction::Continue => stack.push(frame),
                         StepAction::EndOfMethod => debug!("Reached end of method"),
+                        StepAction::InitializeClass(class_name) => {
+                            debug!("Initializing class: {}", class_name.to_string());
+
+                            let class = self.loader
+                                .resolve_class(&class_name)
+                                .expect("Unable to find class");
+
+                            self.data_store.register_class(class_name);
+
+                            let init_method = class.maybe_resolve_method("<clinit>")
+                                .expect("Cannot find <clinit> for class");
+
+                            stack.push(frame);
+                            stack.push(Frame::new(class, init_method, vec![]));
+                        }
                         StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
                                    class_name.to_string(),
@@ -149,5 +169,56 @@ impl VirtualMachine {
         }
 
         stack.push(Frame::new(class, method, args));
+    }
+}
+
+pub struct ClassStaticInfo {
+    pub static_fields: HashMap<Rc<Utf8Info>, JavaType>,
+}
+
+impl ClassStaticInfo {
+    pub fn new() -> ClassStaticInfo {
+        ClassStaticInfo { static_fields: HashMap::new() }
+    }
+}
+
+pub struct CommonDataStore {
+    pub class_statics: HashMap<Rc<Utf8Info>, ClassStaticInfo>,
+}
+
+impl CommonDataStore {
+    pub fn new() -> CommonDataStore {
+        CommonDataStore { class_statics: HashMap::new() }
+    }
+
+    pub fn has_class_statics(&self, class_name: &Rc<Utf8Info>) -> bool {
+        self.class_statics.contains_key(class_name)
+    }
+
+    pub fn register_class(&mut self, class_name: Rc<Utf8Info>) {
+        self.class_statics.insert(class_name, ClassStaticInfo::new());
+    }
+
+    pub fn set_class_static(&mut self,
+                            class_name: &Rc<Utf8Info>,
+                            field_name: Rc<Utf8Info>,
+                            value: JavaType) {
+        self.class_statics
+            .get_mut(class_name)
+            .expect("Unable to find initialized class statics")
+            .static_fields
+            .insert(field_name, value);
+    }
+
+    pub fn get_class_static(&self,
+                            class_name: &Rc<Utf8Info>,
+                            field_name: &Rc<Utf8Info>)
+                            -> &JavaType {
+        self.class_statics
+            .get(class_name)
+            .expect("Unable to find initialized class statics")
+            .static_fields
+            .get(field_name)
+            .expect("Unable to find static field on class")
     }
 }

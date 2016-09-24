@@ -1,5 +1,7 @@
 
-use pantomime_parser::primitives::{U1, U2, U4};
+use super::CommonDataStore;
+
+use pantomime_parser::primitives::{U1, U2};
 
 use pantomime_parser::{ClassFile, ParserError};
 use pantomime_parser::components::{Attribute, CodeAttribute, ConstantPoolItem,
@@ -43,6 +45,10 @@ impl Codepoint {
         current_position
     }
 
+    pub fn reverse(&mut self, steps: usize) {
+        self.position -= steps;
+    }
+
     pub fn current(&self) -> usize {
         self.position as usize
     }
@@ -58,6 +64,7 @@ pub enum StepAction {
         descriptor: Rc<Utf8Info>,
         args: Vec<JavaType>,
     },
+    InitializeClass(Rc<Utf8Info>),
     Continue,
     EndOfMethod,
 }
@@ -78,12 +85,12 @@ impl From<ParserError> for StepError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum JavaType {
     String { index: U2 },
-    Byte { value: u8 },
-    Int { value: u32 },
-    Long { value: u64 },
+    Byte { value: i8 },
+    Int { value: i32 },
+    Long { value: i64 },
     Filler,
     Empty,
 }
@@ -119,21 +126,14 @@ impl JavaType {
         };
     }
 
-    pub fn take(index: usize, variables: &mut Vec<JavaType>) -> JavaType {
-        let removing_last = index >= variables.len();
-        let removed_element = variables.remove(index);
-
-        if removing_last {
-            variables.push(JavaType::Empty);
-        } else {
-            variables.insert(index, JavaType::Empty);
-        }
-
-        removed_element
+    pub fn load(index: usize, variables: &mut Vec<JavaType>) -> JavaType {
+        variables.get(index)
+            .expect(&format!("Expected vec to contain item at index: {}", index))
+            .clone()
     }
 
-    generate_javatype_pop_method!(Int, u32, pop_int);
-    generate_javatype_pop_method!(Long, u64, pop_long);
+    generate_javatype_pop_method!(Int, i32, pop_int);
+    generate_javatype_pop_method!(Long, i64, pop_long);
 }
 
 pub struct Frame {
@@ -173,7 +173,7 @@ impl Frame {
         }
     }
 
-    pub fn step(&mut self) -> StepResult<StepAction> {
+    pub fn step(&mut self, data_store: &mut CommonDataStore) -> StepResult<StepAction> {
         let constant_pool = &self.classfile.constant_pool;
         let ref mut code_position = self.code_position;
 
@@ -182,14 +182,16 @@ impl Frame {
 
             match *opcode {
                 // iconst_2
-                5 => self.operand_stack.push(JavaType::Int { value: 5 }),
+                5 => self.operand_stack.push(JavaType::Int { value: 2 }),
+                // iconst_3
+                6 => self.operand_stack.push(JavaType::Int { value: 3 }),
                 // iconst_5
                 8 => self.operand_stack.push(JavaType::Int { value: 5 }),
                 // bipush
                 16 => {
                     let entry = try!(Self::next_opcode_entry_u1(code_position,
                                                                 &self.code_attribute));
-                    self.operand_stack.push(JavaType::Int { value: entry as U4 });
+                    self.operand_stack.push(JavaType::Int { value: entry as i32 });
                 }
                 // ldc
                 18 => {
@@ -198,7 +200,9 @@ impl Frame {
                     let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
                                                                                constant_pool)) {
                         &ConstantPoolItem::String(..) => JavaType::String { index: index },
-                        &ConstantPoolItem::Integer(ref info) => JavaType::Int { value: info.bytes },
+                        &ConstantPoolItem::Integer(ref info) => {
+                            JavaType::Int { value: info.bytes as i32 }
+                        }
                         item @ _ => {
                             return Err(StepError::UnexpectedConstantPoolItem(
                                     item.to_friendly_name()));
@@ -214,8 +218,8 @@ impl Frame {
                     let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
                                                                                constant_pool)) {
                         &ConstantPoolItem::Long(ref info) => {
-                            let value: u64 = ((info.high_bytes as u64) << 32) +
-                                             info.low_bytes as u64;
+                            let value: i64 = ((info.high_bytes as i64) << 32) +
+                                             info.low_bytes as i64;
                             JavaType::Long { value: value }
                         }
                         item @ _ => {
@@ -225,19 +229,19 @@ impl Frame {
                     };
 
                     self.operand_stack.push(stack_val);
-                    // We need to take up two spots in the operand stack
+                    // We need to load up two spots in the operand stack
                     self.operand_stack.push(JavaType::Filler);
                 }
                 // iload_0
-                26 => self.operand_stack.push(JavaType::take(0, &mut self.variables)),
+                26 => self.operand_stack.push(JavaType::load(0, &mut self.variables)),
                 // iload_1
-                27 => self.operand_stack.push(JavaType::take(1, &mut self.variables)),
+                27 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
                 // lload_0 (the first value is filler)
-                30 => self.operand_stack.push(JavaType::take(1, &mut self.variables)),
+                30 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
                 // lload_2 (the first value is filler)
-                32 => self.operand_stack.push(JavaType::take(3, &mut self.variables)),
+                32 => self.operand_stack.push(JavaType::load(3, &mut self.variables)),
                 // aload_0
-                42 => self.operand_stack.push(JavaType::take(0, &mut self.variables)),
+                42 => self.operand_stack.push(JavaType::load(0, &mut self.variables)),
                 // istore_1
                 60 => {
                     self.variables[1] =
@@ -277,10 +281,44 @@ impl Frame {
                 // i2b
                 145 => {
                     let int_val = try!(JavaType::pop_int(&mut self.operand_stack));
-                    self.operand_stack.push(JavaType::Byte { value: int_val as U1 });
+                    self.operand_stack.push(JavaType::Byte { value: int_val as i8 });
                 }
                 // return
                 177 => return Ok(StepAction::EndOfMethod),
+                // getstatic
+                178 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+
+                    let field_info = try!(ConstantPoolItem::retrieve_field_info(index,
+                                                                                constant_pool));
+                    let field = try!(Resolver::resolve_field_info(&*field_info, constant_pool));
+
+                    if !data_store.has_class_statics(&field.class_name) {
+                        code_position.reverse(3);
+                        return Ok(StepAction::InitializeClass(field.class_name));
+                    }
+
+                    let field_value = data_store.get_class_static(&field.class_name, &field.name);
+                    self.operand_stack.push(field_value.clone());
+                }
+                // putstatic
+                179 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+
+                    let field_info = try!(ConstantPoolItem::retrieve_field_info(index,
+                                                                                constant_pool));
+                    let field = try!(Resolver::resolve_field_info(&*field_info, constant_pool));
+
+                    if !data_store.has_class_statics(&field.class_name) {
+                        code_position.reverse(3);
+                        return Ok(StepAction::InitializeClass(field.class_name));
+                    }
+
+                    let value = self.operand_stack.pop().expect("Expected value on operand stack");
+                    data_store.set_class_static(&field.class_name, field.name, value);
+                }
                 // invokestatic
                 184 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
@@ -392,6 +430,36 @@ macro_rules! generate_field_method_interface_method_struct {
     }
 }
 
+macro_rules! generate_resolver_method {
+    ($method_name:ident, $struct_name:ident) => {
+        pub fn $method_name(info: &FieldOrMethodOrInterfaceMethodInfo,
+                                   constant_pool: &Vec<ConstantPoolItem>)
+            -> StepResult<$struct_name> {
+                let class_index = info.class_index;
+                let name_and_type_index = info.name_and_type_index;
+
+                let class = try!(ConstantPoolItem::retrieve_class_info(class_index, constant_pool));
+                let name_and_type =
+                    try!(ConstantPoolItem::retrieve_name_and_type_info(name_and_type_index,
+                                                                       constant_pool));
+
+                let class_name = try!(ConstantPoolItem::retrieve_utf8_info(class.name_index,
+                                                                           constant_pool));
+                let name = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.name_index,
+                                                                     constant_pool));
+                let descriptor = try!(ConstantPoolItem::retrieve_utf8_info(
+                        name_and_type.descriptor_index,
+                        constant_pool));
+
+                Ok($struct_name {
+                    class_name: class_name,
+                    name: name,
+                    descriptor: descriptor,
+                })
+            }
+    }
+}
+
 generate_field_method_interface_method_struct!(InitializedFieldInfo);
 generate_field_method_interface_method_struct!(InitializedMethodInfo);
 generate_field_method_interface_method_struct!(InitializedInterfaceMethodInfo);
@@ -399,27 +467,8 @@ generate_field_method_interface_method_struct!(InitializedInterfaceMethodInfo);
 struct Resolver;
 
 impl Resolver {
-    pub fn resolve_method_info(info: &FieldOrMethodOrInterfaceMethodInfo,
-                               constant_pool: &Vec<ConstantPoolItem>)
-                               -> StepResult<InitializedMethodInfo> {
-        let class_index = info.class_index;
-        let name_and_type_index = info.name_and_type_index;
-
-        let class = try!(ConstantPoolItem::retrieve_class_info(class_index, constant_pool));
-        let name_and_type =
-            try!(ConstantPoolItem::retrieve_name_and_type_info(name_and_type_index, constant_pool));
-
-        let class_name = try!(ConstantPoolItem::retrieve_utf8_info(class.name_index,
-                                                                   constant_pool));
-        let name = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.name_index,
-                                                             constant_pool));
-        let descriptor = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.descriptor_index,
-                                                                   constant_pool));
-
-        Ok(InitializedMethodInfo {
-            class_name: class_name,
-            name: name,
-            descriptor: descriptor,
-        })
-    }
+    generate_resolver_method!(resolve_method_info, InitializedMethodInfo);
+    generate_resolver_method!(resolve_field_info, InitializedFieldInfo);
+    generate_resolver_method!(resolve_interface_method_info,
+                              InitializedInterfaceMethodInfo);
 }
