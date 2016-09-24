@@ -110,10 +110,10 @@ impl Interpreter {
             match *opcode {
                 // ldc
                 18 => {
-                    let index = retrieve_and_advance!(code_position, self.code_attribute.code);
+                    let index = try!(Self::build_index_u1(code_position, &self.code_attribute));
 
-                    let stack_val = match try!(Self::retrieve_constant_pool_item(index,
-                                                                                 constant_pool)) {
+                    let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
+                                                                               constant_pool)) {
                         &ConstantPoolItem::String(..) => JavaType::String { index: index },
                         item @ _ => {
                             return Err(InterpreterError::UnexpectedConstantPoolItem(
@@ -132,31 +132,24 @@ impl Interpreter {
                 177 => return Ok(InterpreterAction::EndOfMethod),
                 // invokestatic
                 184 => {
-                    let index_one = retrieve_and_advance!(code_position, self.code_attribute.code);
-                    let index_two = retrieve_and_advance!(code_position, self.code_attribute.code);
+                    let index = try!(Self::build_index_u2(code_position, &self.code_attribute));
 
-                    let index = (index_one << 8) | index_two;
+                    let method_info = try!(ConstantPoolItem::retrieve_method_info(index,
+                                                                                  constant_pool));
+                    let method = try!(Resolver::resolve_method_info(&*method_info, constant_pool));
 
-                    match try!(Self::retrieve_constant_pool_item(index, constant_pool)) {
-                        &ConstantPoolItem::Method(ref val) => {
-                            let method = try!(Resolver::resolve_method_info(val, constant_pool));
+                    // TODO: Actually work out the number of arguments
+                    let mut args = vec![];
+                    args.push(self.stack
+                        .pop()
+                        .expect("Should have already had an argument on the stack"));
 
-                            // TODO: Actually work out the number of arguments
-                            let mut args = vec![];
-                            args.push(self.stack
-                                .pop()
-                                .expect("Should have already had an argument on the stack"));
-
-                            return Ok(InterpreterAction::InvokeStaticMethod {
-                                class_name: method.class_name,
-                                name: method.name,
-                                descriptor: method.descriptor,
-                                args: args,
-                            });
-                        }
-                        item @ _ => return Err(InterpreterError::UnexpectedConstantPoolItem(
-                                item.to_friendly_name())),
-                    }
+                    return Ok(InterpreterAction::InvokeStaticMethod {
+                        class_name: method.class_name,
+                        name: method.name,
+                        descriptor: method.descriptor,
+                        args: args,
+                    });
                 }
                 val @ _ => return Err(InterpreterError::UnknownOpcode(val)),
             }
@@ -167,10 +160,21 @@ impl Interpreter {
         Ok(InterpreterAction::EndOfMethod)
     }
 
-    fn retrieve_constant_pool_item<'r>(index: U2,
-                                       constant_pool: &'r Vec<ConstantPoolItem>)
-                                       -> InterpreterResult<&'r ConstantPoolItem> {
-        Ok(try!(ConstantPoolItem::retrieve_item(index as usize, constant_pool)))
+    fn build_index_u1(code_position: &mut Codepoint,
+                      code_attribute: &CodeAttribute)
+                      -> InterpreterResult<U2> {
+        let index = retrieve_and_advance!(code_position, code_attribute.code);
+        Ok(index)
+    }
+
+    fn build_index_u2(code_position: &mut Codepoint,
+                      code_attribute: &Rc<CodeAttribute>)
+                      -> InterpreterResult<U2> {
+        let index_one = retrieve_and_advance!(code_position, code_attribute.code);
+        let index_two = retrieve_and_advance!(code_position, code_attribute.code);
+
+        let index = (index_one << 8) | index_two;
+        Ok(index)
     }
 
     fn resolve_code_attribute(attributes: &Vec<Rc<Attribute>>) -> Option<Rc<CodeAttribute>> {
