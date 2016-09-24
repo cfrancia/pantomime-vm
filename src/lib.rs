@@ -121,13 +121,16 @@ impl VirtualMachine {
 
                 // TODO: Don't always assume it's going to be native println
                 // with a single string argument
-                let value = match args.pop().unwrap() {
+                match args.pop().unwrap() {
                     JavaType::String { index } => {
-                        class.constant_pool_resolver().resolve_string_constant(index).unwrap()
+                        let value =
+                            class.constant_pool_resolver().resolve_string_constant(index).unwrap();
+                        println!("OUT: {}", value);
                     }
-                };
+                    JavaType::Int { value } => println!("OUT: {}", value),
+                    item @ _ => panic!("Unexpected variable: {:?}", item),
+                }
 
-                println!("OUT: {}", value);
                 return;
             }
         }

@@ -1,5 +1,5 @@
 
-use pantomime_parser::primitives::{U1, U2};
+use pantomime_parser::primitives::{U1, U2, U4};
 
 use pantomime_parser::{ClassFile, ParserError};
 use pantomime_parser::components::{Attribute, CodeAttribute, ConstantPoolItem,
@@ -71,6 +71,8 @@ impl From<ParserError> for StepError {
 #[derive(Debug)]
 pub enum JavaType {
     String { index: U2 },
+    Int { value: U4 },
+    Empty,
 }
 
 pub struct Frame {
@@ -82,11 +84,24 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn new(classfile: Rc<ClassFile>, method: Rc<Method>, variables: Vec<JavaType>) -> Frame {
+    pub fn new(classfile: Rc<ClassFile>,
+               method: Rc<Method>,
+               provided_variables: Vec<JavaType>)
+               -> Frame {
         debug!("Interpreting method: {}", method.name.to_string());
 
         let code_attribute = Self::resolve_code_attribute(&method.attributes)
             .expect("Method does not have a code attribute!");
+
+        let mut variables = vec![];
+        for _ in 0..code_attribute.max_locals {
+            variables.push(JavaType::Empty);
+        }
+
+        let mut provided_variables = provided_variables;
+        for (i, item) in provided_variables.drain(..).enumerate() {
+            variables[i] = item;
+        }
 
         Frame {
             classfile: classfile,
@@ -104,6 +119,7 @@ impl Frame {
         if let Some(opcode) = self.code_attribute.code.get(code_position.current()) {
             code_position.get_and_increment();
 
+
             match *opcode {
                 // ldc
                 18 => {
@@ -111,6 +127,7 @@ impl Frame {
                     let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
                                                                                constant_pool)) {
                         &ConstantPoolItem::String(..) => JavaType::String { index: index },
+                        &ConstantPoolItem::Integer(ref info) => JavaType::Int { value: info.bytes },
                         item @ _ => {
                             return Err(StepError::UnexpectedConstantPoolItem(
                                     item.to_friendly_name()));
@@ -119,10 +136,14 @@ impl Frame {
 
                     self.operand_stack.push(stack_val);
                 }
+                // iload_1
+                27 => self.operand_stack.push(self.variables.remove(1)),
                 // aload_0
-                42 => {
-                    let var = self.variables.remove(0);
-                    self.operand_stack.push(var);
+                42 => self.operand_stack.push(self.variables.remove(0)),
+                // istore_1
+                60 => {
+                    self.variables[1] =
+                        self.operand_stack.pop().expect("Operand stack was unexpectedly empty")
                 }
                 // return
                 177 => return Ok(StepAction::EndOfMethod),
