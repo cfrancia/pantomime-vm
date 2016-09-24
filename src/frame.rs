@@ -82,6 +82,7 @@ impl From<ParserError> for StepError {
 pub enum JavaType {
     String { index: U2 },
     Int { value: U4 },
+    Byte { value: U1 },
     Empty,
 }
 
@@ -90,6 +91,7 @@ impl JavaType {
         return match self {
             &JavaType::String { .. } => "String",
             &JavaType::Int { .. } => "Int",
+            &JavaType::Byte { .. } => "Byte",
             &JavaType::Empty => "Empty",
         };
     }
@@ -167,6 +169,8 @@ impl Frame {
             code_position.get_and_increment();
 
             match *opcode {
+                // iconst_2
+                5 => self.operand_stack.push(JavaType::Int { value : 5}),
                 // iconst_5
                 8 => self.operand_stack.push(JavaType::Int { value: 5 }),
                 // bipush
@@ -216,6 +220,11 @@ impl Frame {
                     };
 
                     self.operand_stack.push(JavaType::Int { value: result });
+                }
+                // i2b
+                145 => {
+                    let int_val = try!(JavaType::pop_int(&mut self.operand_stack));
+                    self.operand_stack.push(JavaType::Byte { value: int_val as U1 });
                 }
                 // return
                 177 => return Ok(StepAction::EndOfMethod),

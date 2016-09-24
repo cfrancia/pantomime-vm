@@ -139,6 +139,7 @@ impl VirtualMachine {
                         println!("OUT: {}", value);
                     }
                     JavaType::Int { value } => println!("OUT: {}", value),
+                    JavaType::Byte { value } => println!("OUT: {}", value),
                     item @ _ => panic!("Unexpected variable: {:?}", item),
                 }
 
