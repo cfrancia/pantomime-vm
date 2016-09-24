@@ -108,7 +108,6 @@ impl Frame {
                 // ldc
                 18 => {
                     let index = try!(Self::build_index_u1(code_position, &self.code_attribute));
-
                     let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
                                                                                constant_pool)) {
                         &ConstantPoolItem::String(..) => JavaType::String { index: index },
