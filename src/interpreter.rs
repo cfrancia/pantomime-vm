@@ -132,30 +132,25 @@ impl Interpreter {
                     let index = (index_one << 8) | index_two;
 
                     match try!(Self::retrieve_constant_pool_item(index, constant_pool)) {
-                        &ConstantPoolItem::FieldOrMethodOrInterfaceMethod(ref val) => {
-                            match val.tag {
-                                10 => {
-                                    let method = try!(Resolver::resolve_method_info(val,
-                                                                                    constant_pool));
+                        &ConstantPoolItem::Method(ref val) => {
+                            let method = try!(Resolver::resolve_method_info(val,
+                                                                            constant_pool));
 
-                                    // TODO: Actually work out the number of arguments
-                                    let mut args = vec![];
-                                    args.push(self.stack
-                                        .pop()
-                                        .expect("Should have already had an argument on the \
+                            // TODO: Actually work out the number of arguments
+                            let mut args = vec![];
+                            args.push(self.stack
+                                      .pop()
+                                      .expect("Should have already had an argument on the \
                                                  stack"));
 
-                                    self.code_position = current_position;
+                            self.code_position = current_position;
 
-                                    return Ok(InterpreterAction::InvokeStaticMethod {
-                                        class_name: method.class_name,
-                                        name: method.name,
-                                        descriptor: method.descriptor,
-                                        args: args,
-                                    });
-                                }
-                                _ => unimplemented!(),
-                            }
+                            return Ok(InterpreterAction::InvokeStaticMethod {
+                                class_name: method.class_name,
+                                name: method.name,
+                                descriptor: method.descriptor,
+                                args: args,
+                            });
                         }
                         item @ _ => return Err(InterpreterError::UnexpectedConstantPoolItem(
                                 item.to_friendly_name())),
@@ -210,19 +205,19 @@ impl Resolver {
     pub fn resolve_method_info(info: &FieldOrMethodOrInterfaceMethodInfo,
                                constant_pool: &Vec<ConstantPoolItem>)
                                -> InterpreterResult<InitializedMethodInfo> {
-        let class_index = info.class_index as usize;
-        let name_and_type_index = info.name_and_type_index as usize;
+        let class_index = info.class_index;
+        let name_and_type_index = info.name_and_type_index;
 
         let class = try!(ConstantPoolItem::retrieve_class_info(class_index, constant_pool));
         let name_and_type =
             try!(ConstantPoolItem::retrieve_name_and_type_info(name_and_type_index, constant_pool));
 
-        let class_name = try!(ConstantPoolItem::retrieve_utf8_info(class.name_index as usize,
+        let class_name = try!(ConstantPoolItem::retrieve_utf8_info(class.name_index,
                                                                    constant_pool));
-        let name = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.name_index as usize,
+        let name = try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.name_index,
                                                              constant_pool));
         let descriptor =
-            try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.descriptor_index as usize,
+            try!(ConstantPoolItem::retrieve_utf8_info(name_and_type.descriptor_index,
                                                       constant_pool));
 
         Ok(InitializedMethodInfo {

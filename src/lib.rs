@@ -7,7 +7,7 @@ use interpreter::{Interpreter, InterpreterAction, InterpreterError, JavaType};
 use loader::BaseClassLoader;
 
 use pantomime_parser::{ClassFile, ParserError};
-use pantomime_parser::components::{AccessFlags, ConstantPoolItem, Method};
+use pantomime_parser::components::{AccessFlags, Method};
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -123,17 +123,7 @@ impl VirtualMachine {
                 // with a single string argument
                 let value = match args.pop().unwrap() {
                     JavaType::String { index } => {
-                        let constant_pool = &class.constant_pool;
-
-                        let string_info = ConstantPoolItem::retrieve_string_info(index as usize,
-                                                                                 &constant_pool)
-                            .unwrap();
-                        let utf8_info =
-                            ConstantPoolItem::retrieve_utf8_info(string_info.string_index as usize,
-                                                                 &constant_pool)
-                                .unwrap();
-
-                        utf8_info.to_string()
+                        class.constant_pool_resolver().resolve_string_constant(index).unwrap()
                     }
                 };
 
