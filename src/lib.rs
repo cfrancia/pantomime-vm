@@ -47,7 +47,9 @@ impl VirtualMachine {
     }
 
     pub fn start(&mut self, main_class: &str) {
-        let main_class = self.loader.load_class(main_class).expect("Unable to load main class!");
+        self.loader.preload_classes();
+
+        let main_class = self.loader.resolve_class(main_class).expect("Unable to load main class!");
         let main_method = main_class.maybe_resolve_main_method()
             .expect("Provided main class does not have a main method!");
 
@@ -75,7 +77,7 @@ impl VirtualMachine {
                                    descriptor.to_string());
 
                             let class =
-                                self.loader.load_class(&class_name).expect("Unable to find class");
+                                self.loader.resolve_class(&class_name).expect("Unable to find class");
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
