@@ -3,7 +3,7 @@ extern crate pantomime_parser;
 #[macro_use]
 extern crate log;
 
-use interpreter::{Interpreter, InterpreterAction, InterpreterError, JavaType};
+use frame::{Frame, StepAction, StepError, JavaType};
 use loader::BaseClassLoader;
 
 use pantomime_parser::{ClassFile, ParserError};
@@ -12,7 +12,7 @@ use pantomime_parser::components::{AccessFlags, Method};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-mod interpreter;
+mod frame;
 mod loader;
 
 pub type VirtualMachineResult<T> = Result<T, VirtualMachineError>;
@@ -54,23 +54,20 @@ impl VirtualMachine {
             .expect("Provided main class does not have a main method!");
 
         let mut stack = vec![];
-        stack.push(Interpreter::new(main_class, main_method, vec![]));
+        stack.push(Frame::new(main_class, main_method, vec![]));
 
         loop {
-            let mut interpreter = stack.pop().expect("The stack is unexpectedly empty!");
+            let mut frame = stack.pop().expect("The stack is unexpectedly empty!");
 
-            match interpreter.step() {
+            match frame.step() {
                 Ok(action) => {
                     match action {
-                        InterpreterAction::Continue => stack.push(interpreter),
-                        InterpreterAction::EndOfMethod => {
+                        StepAction::Continue => stack.push(frame),
+                        StepAction::EndOfMethod => {
                             debug!("Reached end of method");
                             break;
                         }
-                        InterpreterAction::InvokeStaticMethod { class_name,
-                                                                name,
-                                                                descriptor,
-                                                                args } => {
+                        StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
                                    class_name.to_string(),
                                    name.to_string(),
@@ -82,30 +79,30 @@ impl VirtualMachine {
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
-                            stack.push(interpreter);
+                            stack.push(frame);
                             Self::call_static_method(class, method, args, &mut stack);
                         }
                     }
                 }
                 Err(error) => {
-                    Self::handle_interpreter_error(error);
+                    Self::handle_step_error(error);
                 }
             }
         }
     }
 
-    fn handle_interpreter_error(error: InterpreterError) {
+    fn handle_step_error(error: StepError) {
         match error {
-            InterpreterError::Parser(val) => {
+            StepError::Parser(val) => {
                 panic!("Parser error: {:?}", val);
             }
-            InterpreterError::CodeIndexOutOfBounds(val) => {
+            StepError::CodeIndexOutOfBounds(val) => {
                 panic!("Code index out of bounds: {:?}", val);
             }
-            InterpreterError::UnexpectedConstantPoolItem(item) => {
+            StepError::UnexpectedConstantPoolItem(item) => {
                 panic!("Unexpected ConstantPoolItem: {}", item);
             }
-            InterpreterError::UnknownOpcode(val) => {
+            StepError::UnknownOpcode(val) => {
                 panic!("Unknown opcode: {}", val);
             }
         }
@@ -114,7 +111,7 @@ impl VirtualMachine {
     fn call_static_method(class: Rc<ClassFile>,
                           method: Rc<Method>,
                           args: Vec<JavaType>,
-                          stack: &mut Vec<Interpreter>) {
+                          stack: &mut Vec<Frame>) {
         let mut args = args;
         {
             let access_flags = &method.access_flags;
@@ -135,6 +132,6 @@ impl VirtualMachine {
             }
         }
 
-        stack.push(Interpreter::new(class, method, args));
+        stack.push(Frame::new(class, method, args));
     }
 }

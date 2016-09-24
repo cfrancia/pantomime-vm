@@ -12,7 +12,7 @@ macro_rules! retrieve_and_advance {
         {
             let temp_var = match $vec$(.$additional_ident)*.get($index.get_and_increment()) {
                 Some(val) => val,
-                None => return Err(InterpreterError::CodeIndexOutOfBounds($index.current())),
+                None => return Err(StepError::CodeIndexOutOfBounds($index.current())),
             };
 
             *temp_var as U2
@@ -40,10 +40,10 @@ impl Codepoint {
     }
 }
 
-pub type InterpreterResult<T> = Result<T, InterpreterError>;
+pub type StepResult<T> = Result<T, StepError>;
 
 #[derive(Debug)]
-pub enum InterpreterAction {
+pub enum StepAction {
     InvokeStaticMethod {
         class_name: Rc<Utf8Info>,
         name: Rc<Utf8Info>,
@@ -55,16 +55,16 @@ pub enum InterpreterAction {
 }
 
 #[derive(Debug)]
-pub enum InterpreterError {
+pub enum StepError {
     CodeIndexOutOfBounds(usize),
     Parser(ParserError),
     UnexpectedConstantPoolItem(&'static str),
     UnknownOpcode(U1),
 }
 
-impl From<ParserError> for InterpreterError {
-    fn from(error: ParserError) -> InterpreterError {
-        InterpreterError::Parser(error)
+impl From<ParserError> for StepError {
+    fn from(error: ParserError) -> StepError {
+        StepError::Parser(error)
     }
 }
 
@@ -73,34 +73,31 @@ pub enum JavaType {
     String { index: U2 },
 }
 
-pub struct Interpreter {
+pub struct Frame {
     classfile: Rc<ClassFile>,
     code_attribute: Rc<CodeAttribute>,
     code_position: Codepoint,
-    stack: Vec<JavaType>,
+    operand_stack: Vec<JavaType>,
     variables: Vec<JavaType>,
 }
 
-impl Interpreter {
-    pub fn new(classfile: Rc<ClassFile>,
-               method: Rc<Method>,
-               variables: Vec<JavaType>)
-               -> Interpreter {
+impl Frame {
+    pub fn new(classfile: Rc<ClassFile>, method: Rc<Method>, variables: Vec<JavaType>) -> Frame {
         debug!("Interpreting method: {}", method.name.to_string());
 
         let code_attribute = Self::resolve_code_attribute(&method.attributes)
             .expect("Method does not have a code attribute!");
 
-        Interpreter {
+        Frame {
             classfile: classfile,
             code_attribute: code_attribute,
             code_position: Codepoint::new(),
-            stack: vec![],
+            operand_stack: vec![],
             variables: variables,
         }
     }
 
-    pub fn step(&mut self) -> InterpreterResult<InterpreterAction> {
+    pub fn step(&mut self) -> StepResult<StepAction> {
         let constant_pool = &self.classfile.constant_pool;
         let ref mut code_position = self.code_position;
 
@@ -116,20 +113,20 @@ impl Interpreter {
                                                                                constant_pool)) {
                         &ConstantPoolItem::String(..) => JavaType::String { index: index },
                         item @ _ => {
-                            return Err(InterpreterError::UnexpectedConstantPoolItem(
+                            return Err(StepError::UnexpectedConstantPoolItem(
                                     item.to_friendly_name()));
                         }
                     };
 
-                    self.stack.push(stack_val);
+                    self.operand_stack.push(stack_val);
                 }
                 // aload_0
                 42 => {
                     let var = self.variables.remove(0);
-                    self.stack.push(var);
+                    self.operand_stack.push(var);
                 }
                 // return
-                177 => return Ok(InterpreterAction::EndOfMethod),
+                177 => return Ok(StepAction::EndOfMethod),
                 // invokestatic
                 184 => {
                     let index = try!(Self::build_index_u2(code_position, &self.code_attribute));
@@ -140,36 +137,36 @@ impl Interpreter {
 
                     // TODO: Actually work out the number of arguments
                     let mut args = vec![];
-                    args.push(self.stack
+                    args.push(self.operand_stack
                         .pop()
                         .expect("Should have already had an argument on the stack"));
 
-                    return Ok(InterpreterAction::InvokeStaticMethod {
+                    return Ok(StepAction::InvokeStaticMethod {
                         class_name: method.class_name,
                         name: method.name,
                         descriptor: method.descriptor,
                         args: args,
                     });
                 }
-                val @ _ => return Err(InterpreterError::UnknownOpcode(val)),
+                val @ _ => return Err(StepError::UnknownOpcode(val)),
             }
 
-            return Ok(InterpreterAction::Continue);
+            return Ok(StepAction::Continue);
         }
 
-        Ok(InterpreterAction::EndOfMethod)
+        Ok(StepAction::EndOfMethod)
     }
 
     fn build_index_u1(code_position: &mut Codepoint,
                       code_attribute: &CodeAttribute)
-                      -> InterpreterResult<U2> {
+                      -> StepResult<U2> {
         let index = retrieve_and_advance!(code_position, code_attribute.code);
         Ok(index)
     }
 
     fn build_index_u2(code_position: &mut Codepoint,
                       code_attribute: &Rc<CodeAttribute>)
-                      -> InterpreterResult<U2> {
+                      -> StepResult<U2> {
         let index_one = retrieve_and_advance!(code_position, code_attribute.code);
         let index_two = retrieve_and_advance!(code_position, code_attribute.code);
 
@@ -209,7 +206,7 @@ struct Resolver;
 impl Resolver {
     pub fn resolve_method_info(info: &FieldOrMethodOrInterfaceMethodInfo,
                                constant_pool: &Vec<ConstantPoolItem>)
-                               -> InterpreterResult<InitializedMethodInfo> {
+                               -> StepResult<InitializedMethodInfo> {
         let class_index = info.class_index;
         let name_and_type_index = info.name_and_type_index;
 
