@@ -1,7 +1,10 @@
 extern crate pantomime_parser;
+extern crate regex;
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate lazy_static;
 
 use frame::{Frame, StepAction, StepError, JavaType};
 use loader::BaseClassLoader;
@@ -57,16 +60,18 @@ impl VirtualMachine {
         stack.push(Frame::new(main_class, main_method, vec![]));
 
         loop {
-            let mut frame = stack.pop().expect("The stack is unexpectedly empty!");
+            if stack.len() == 0 {
+                debug!("Reached the end of the stack");
+                break;
+            }
+
+            let mut frame = stack.pop().unwrap();
 
             match frame.step() {
                 Ok(action) => {
                     match action {
                         StepAction::Continue => stack.push(frame),
-                        StepAction::EndOfMethod => {
-                            debug!("Reached end of method");
-                            break;
-                        }
+                        StepAction::EndOfMethod => debug!("Reached end of method"),
                         StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
                                    class_name.to_string(),
@@ -99,8 +104,14 @@ impl VirtualMachine {
             StepError::CodeIndexOutOfBounds(val) => {
                 panic!("Code index out of bounds: {:?}", val);
             }
+            StepError::UnexpectedEmptyVec => {
+                panic!("Referenced vector was unexpectedly empty");
+            }
             StepError::UnexpectedConstantPoolItem(item) => {
                 panic!("Unexpected ConstantPoolItem: {}", item);
+            }
+            StepError::UnexpectedJavaType(item) => {
+                panic!("Unexpected JavaType on locals/operand stack: {}", item);
             }
             StepError::UnknownOpcode(val) => {
                 panic!("Unknown opcode: {}", val);
