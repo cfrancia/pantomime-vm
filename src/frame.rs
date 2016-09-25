@@ -4,8 +4,7 @@ use super::CommonDataStore;
 use pantomime_parser::primitives::{U1, U2};
 
 use pantomime_parser::{ClassFile, ParserError};
-use pantomime_parser::components::{Attribute, CodeAttribute, ConstantPoolItem,
-                                   FieldOrMethodOrInterfaceMethodInfo, Method, Utf8Info};
+use pantomime_parser::components::{Attribute, CodeAttribute, ConstantPoolItem, Method, Utf8Info};
 
 use regex::Regex;
 
@@ -289,10 +288,7 @@ impl Frame {
                 178 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
-
-                    let field_info = try!(ConstantPoolItem::retrieve_field_info(index,
-                                                                                constant_pool));
-                    let field = try!(Resolver::resolve_field_info(&*field_info, constant_pool));
+                    let field = try!(Resolver::resolve_field_info(index, constant_pool));
 
                     if !data_store.has_class_statics(&field.class_name) {
                         code_position.reverse(3);
@@ -306,10 +302,7 @@ impl Frame {
                 179 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
-
-                    let field_info = try!(ConstantPoolItem::retrieve_field_info(index,
-                                                                                constant_pool));
-                    let field = try!(Resolver::resolve_field_info(&*field_info, constant_pool));
+                    let field = try!(Resolver::resolve_field_info(index, constant_pool));
 
                     if !data_store.has_class_statics(&field.class_name) {
                         code_position.reverse(3);
@@ -323,10 +316,7 @@ impl Frame {
                 184 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
-
-                    let method_info = try!(ConstantPoolItem::retrieve_method_info(index,
-                                                                                  constant_pool));
-                    let method = try!(Resolver::resolve_method_info(&*method_info, constant_pool));
+                    let method = try!(Resolver::resolve_method_info(index, constant_pool));
 
                     let argument_count = Self::determine_number_of_arguments(&method.descriptor);
                     debug!("Passing <{}> arguments", argument_count);
@@ -431,10 +421,12 @@ macro_rules! generate_field_method_interface_method_struct {
 }
 
 macro_rules! generate_resolver_method {
-    ($method_name:ident, $struct_name:ident) => {
-        pub fn $method_name(info: &FieldOrMethodOrInterfaceMethodInfo,
+    ($method_name:ident, $retrieval_method:ident, $struct_name:ident) => {
+        pub fn $method_name(index: U2,
                                    constant_pool: &Vec<ConstantPoolItem>)
             -> StepResult<$struct_name> {
+                let info = try!(ConstantPoolItem::$retrieval_method(index,
+                                                                    constant_pool));
                 let class_index = info.class_index;
                 let name_and_type_index = info.name_and_type_index;
 
@@ -467,8 +459,13 @@ generate_field_method_interface_method_struct!(InitializedInterfaceMethodInfo);
 struct Resolver;
 
 impl Resolver {
-    generate_resolver_method!(resolve_method_info, InitializedMethodInfo);
-    generate_resolver_method!(resolve_field_info, InitializedFieldInfo);
+    generate_resolver_method!(resolve_method_info,
+                              retrieve_method_info,
+                              InitializedMethodInfo);
+    generate_resolver_method!(resolve_field_info,
+                              retrieve_field_info,
+                              InitializedFieldInfo);
     generate_resolver_method!(resolve_interface_method_info,
+                              retrieve_interface_method_info,
                               InitializedInterfaceMethodInfo);
 }
