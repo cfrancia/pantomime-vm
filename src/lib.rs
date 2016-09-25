@@ -77,6 +77,12 @@ impl VirtualMachine {
                     match action {
                         StepAction::Continue => stack.push(frame),
                         StepAction::EndOfMethod => debug!("Reached end of method"),
+                        StepAction::ReturnValue(value) => {
+                            let mut previous_frame = stack.pop()
+                                .expect("Tried to return value with an empty stack");
+                            previous_frame.push_operand_stack_value(value);
+                            stack.push(previous_frame);
+                        }
                         StepAction::InitializeClass(class_name) => {
                             debug!("Initializing class: {}", class_name.to_string());
 
@@ -84,13 +90,64 @@ impl VirtualMachine {
                                 .resolve_class(&class_name)
                                 .expect("Unable to find class");
 
-                            self.data_store.register_class(class_name);
                             stack.push(frame);
+                            Self::initialize_class(class_name,
+                                                   &class,
+                                                   &mut self.data_store,
+                                                   &mut stack);
+                        }
+                        StepAction::AllocateClass(class_name) => {
+                            debug!("Allocating class: {}", class_name.to_string());
 
-                            let init_method = class.maybe_resolve_method("<clinit>");
-                            if init_method.is_some() {
-                                stack.push(Frame::new(class, init_method.unwrap(), vec![]));
+                            let class = self.loader
+                                .resolve_class(&class_name)
+                                .expect("Unable to find class");
+
+                            if !self.data_store.has_class_statics(&class_name) {
+                                Self::initialize_class(class_name,
+                                                       &class,
+                                                       &mut self.data_store,
+                                                       &mut stack);
                             }
+
+                            let pointer = self.data_store.heap().allocate_class(&class);
+                            frame.push_operand_stack_value(JavaType::Reference { value: pointer });
+
+                            stack.push(frame);
+                        }
+                        StepAction::InvokeVirtualMethod { class_name, name, descriptor, args } => {
+                            debug!("Invoking virtual method: {}#{}({})",
+                                   class_name.to_string(),
+                                   name.to_string(),
+                                   descriptor.to_string());
+
+                            let class = self.loader
+                                .resolve_class(&class_name)
+                                .or(self.loader.load_class(&class_name))
+                                .expect("Unable to find class");
+
+                            let method = class.maybe_resolve_method(&**name)
+                                .expect("Unable to find method");
+
+                            stack.push(frame);
+                            Self::call_static_method(class, method, args, &mut stack);
+                        }
+                        StepAction::InvokeSpecialMethod { class_name, name, descriptor, args } => {
+                            debug!("Invoking special method: {}#{}({})",
+                                   class_name.to_string(),
+                                   name.to_string(),
+                                   descriptor.to_string());
+
+                            let class = self.loader
+                                .resolve_class(&class_name)
+                                .or(self.loader.load_class(&class_name))
+                                .expect("Unable to find class");
+
+                            let method = class.maybe_resolve_method(&**name)
+                                .expect("Unable to find method");
+
+                            stack.push(frame);
+                            Self::call_static_method(class, method, args, &mut stack);
                         }
                         StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
@@ -114,6 +171,18 @@ impl VirtualMachine {
                     Self::handle_step_error(error);
                 }
             }
+        }
+    }
+
+    fn initialize_class(class_name: Rc<Utf8Info>,
+                        class: &Rc<ClassFile>,
+                        data_store: &mut CommonDataStore,
+                        stack: &mut Vec<Frame>) {
+        data_store.register_class(class_name);
+
+        let init_method = class.maybe_resolve_method("<clinit>");
+        if init_method.is_some() {
+            stack.push(Frame::new(class.clone(), init_method.unwrap(), vec![]));
         }
     }
 
@@ -152,7 +221,7 @@ impl VirtualMachine {
                 debug!("Method is native");
 
                 // TODO: Don't always assume it's going to be native println
-                // with a single string argument
+                // with a single argument
                 match args.pop().unwrap() {
                     JavaType::String { index } => {
                         let value =
@@ -183,13 +252,55 @@ impl ClassStaticInfo {
     }
 }
 
+pub struct ObjectHeap {
+    current_pointer: u64,
+    objects: HashMap<u64, AllocatedObject>,
+}
+
+impl ObjectHeap {
+    pub fn new() -> ObjectHeap {
+        ObjectHeap {
+            current_pointer: 0,
+            objects: HashMap::new(),
+        }
+    }
+
+    pub fn allocate_class(&mut self, class: &Rc<ClassFile>) -> u64 {
+        let pointer = self.current_pointer;
+
+        let object = AllocatedObject::new();
+        self.objects.insert(pointer, object);
+
+        self.current_pointer += 1;
+        pointer
+    }
+}
+
+pub struct AllocatedObject {
+    instance_variables: HashMap<Rc<Utf8Info>, JavaType>,
+}
+
+impl AllocatedObject {
+    pub fn new() -> AllocatedObject {
+        AllocatedObject { instance_variables: HashMap::new() }
+    }
+}
+
 pub struct CommonDataStore {
     pub class_statics: HashMap<Rc<Utf8Info>, ClassStaticInfo>,
+    pub object_heap: ObjectHeap,
 }
 
 impl CommonDataStore {
     pub fn new() -> CommonDataStore {
-        CommonDataStore { class_statics: HashMap::new() }
+        CommonDataStore {
+            class_statics: HashMap::new(),
+            object_heap: ObjectHeap::new(),
+        }
+    }
+
+    pub fn heap(&mut self) -> &mut ObjectHeap {
+        &mut self.object_heap
     }
 
     pub fn has_class_statics(&self, class_name: &Rc<Utf8Info>) -> bool {

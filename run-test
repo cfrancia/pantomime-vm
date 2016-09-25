@@ -5,11 +5,17 @@ if [ -z $1 ]; then
     exit 1;
 fi
 
+if [ -z $EXTRACTED_JAVA_RT_PATH ]; then
+    echo 'You must export a path to a directory containing all the Java RT classes as [EXTRACTED_JAVA_RT_PATH]'
+    exit 1;
+fi
+
 VM_OUT=vm.out
 
 JAVA_FILE_PATH=$1;
 
 EXPECTED_FILE=$JAVA_FILE_PATH.expected
+BUNDLE_DIR=$JAVA_FILE_PATH.bundle
 
 CLASS_NAME=`basename -s .java $JAVA_FILE_PATH`
 CLASS_FILE_NAME=$CLASS_NAME.class
@@ -21,11 +27,15 @@ fi
 
 TMP_DIR=`mktemp -d` || (echo 'Unable to create temporary directory'; exit 1);
 
-javac -d $TMP_DIR $JAVA_FILE_PATH || (echo 'Unable to compile class'; exit 1);
+if [ -d $BUNDLE_DIR ]; then
+    echo "Using bundle"
+    javac -d $TMP_DIR $JAVA_FILE_PATH $(ls $BUNDLE_DIR/*.java) || (echo 'Unable to compile bundled classes'; exit 1);
+else
+    javac -d $TMP_DIR $JAVA_FILE_PATH || (echo 'Unable to compile class'; exit 1);
+fi
 
 echo "Running test [$CLASS_NAME]"
-
-cargo run -q $(ls $TMP_DIR/*.class) $CLASS_NAME | grep "OUT:" > $TMP_DIR/$VM_OUT
+cargo run -q $EXTRACTED_JAVA_RT_PATH $(ls $TMP_DIR/*.class) $CLASS_NAME | grep "OUT:" > $TMP_DIR/$VM_OUT
 
 diff -q $TMP_DIR/$VM_OUT $EXPECTED_FILE > /dev/null
 

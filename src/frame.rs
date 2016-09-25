@@ -57,14 +57,28 @@ pub type StepResult<T> = Result<T, StepError>;
 
 #[derive(Debug)]
 pub enum StepAction {
+    InvokeVirtualMethod {
+        class_name: Rc<Utf8Info>,
+        name: Rc<Utf8Info>,
+        descriptor: Rc<Utf8Info>,
+        args: Vec<JavaType>,
+    },
     InvokeStaticMethod {
         class_name: Rc<Utf8Info>,
         name: Rc<Utf8Info>,
         descriptor: Rc<Utf8Info>,
         args: Vec<JavaType>,
     },
+    InvokeSpecialMethod {
+        class_name: Rc<Utf8Info>,
+        name: Rc<Utf8Info>,
+        descriptor: Rc<Utf8Info>,
+        args: Vec<JavaType>,
+    },
     InitializeClass(Rc<Utf8Info>),
+    AllocateClass(Rc<Utf8Info>),
     Continue,
+    ReturnValue(JavaType),
     EndOfMethod,
 }
 
@@ -90,6 +104,7 @@ pub enum JavaType {
     Byte { value: i8 },
     Int { value: i32 },
     Long { value: i64 },
+    Reference { value: u64 },
     Filler,
     Empty,
 }
@@ -120,6 +135,7 @@ impl JavaType {
             &JavaType::Byte { .. } => "Byte",
             &JavaType::Int { .. } => "Int",
             &JavaType::Long { .. } => "Long",
+            &JavaType::Reference { .. } => "Reference",
             &JavaType::Filler { .. } => "Filler",
             &JavaType::Empty => "Empty",
         };
@@ -170,6 +186,10 @@ impl Frame {
             operand_stack: vec![],
             variables: variables,
         }
+    }
+
+    pub fn push_operand_stack_value(&mut self, value: JavaType) {
+        self.operand_stack.push(value);
     }
 
     pub fn step(&mut self, data_store: &mut CommonDataStore) -> StepResult<StepAction> {
@@ -241,10 +261,26 @@ impl Frame {
                 32 => self.operand_stack.push(JavaType::load(3, &mut self.variables)),
                 // aload_0
                 42 => self.operand_stack.push(JavaType::load(0, &mut self.variables)),
+                // aload_1
+                43 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
                 // istore_1
                 60 => {
                     self.variables[1] =
                         self.operand_stack.pop().expect("Operand stack was unexpectedly empty")
+                }
+                // astore_1
+                76 => {
+                    self.variables.insert(1,
+                                          self.operand_stack
+                                              .pop()
+                                              .expect("Operand stack was unexpectedly empty"))
+                }
+                // dup
+                89 => {
+                    let value =
+                        self.operand_stack.pop().expect("Operand stack was unexpectedly empty");
+                    self.operand_stack.push(value.clone());
+                    self.operand_stack.push(value);
                 }
                 // iadd | isub | imul | idiv
                 96 | 100 | 104 | 108 => {
@@ -282,6 +318,12 @@ impl Frame {
                     let int_val = try!(JavaType::pop_int(&mut self.operand_stack));
                     self.operand_stack.push(JavaType::Byte { value: int_val as i8 });
                 }
+                // ireturn | areturn
+                172 | 176 => {
+                    return Ok(StepAction::ReturnValue(self.operand_stack
+                        .pop()
+                        .expect("Operand stack was unexpectedly empty")))
+                }
                 // return
                 177 => return Ok(StepAction::EndOfMethod),
                 // getstatic
@@ -312,6 +354,58 @@ impl Frame {
                     let value = self.operand_stack.pop().expect("Expected value on operand stack");
                     data_store.set_class_static(&field.class_name, field.name, value);
                 }
+                // invokevirtual
+                182 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+                    let method = try!(Resolver::resolve_method_info(index, constant_pool));
+
+                    // We add an additional argument for the implicit 'this'
+                    let mut argument_count =
+                        Self::determine_number_of_arguments(&method.descriptor);
+                    argument_count += 1;
+
+                    debug!("Passing <{}> arguments", argument_count);
+
+                    let mut args = vec![];
+                    for _ in 0..argument_count {
+                        args.push(self.operand_stack
+                            .pop()
+                            .expect("Expected value on operand stack"));
+                    }
+
+
+                    return Ok(StepAction::InvokeVirtualMethod {
+                        class_name: method.class_name,
+                        name: method.name,
+                        descriptor: method.descriptor,
+                        args: args,
+                    });
+                }
+                // invokespecial
+                183 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+                    let method = try!(Resolver::resolve_method_info(index, constant_pool));
+
+                    let argument_count = Self::determine_number_of_arguments(&method.descriptor);
+                    debug!("Passing <{}> arguments", argument_count);
+
+                    let mut args = vec![];
+                    for _ in 0..argument_count {
+                        args.push(self.operand_stack
+                            .pop()
+                            .expect("Expected value on operand stack"));
+                    }
+
+
+                    return Ok(StepAction::InvokeSpecialMethod {
+                        class_name: method.class_name,
+                        name: method.name,
+                        descriptor: method.descriptor,
+                        args: args,
+                    });
+                }
                 // invokestatic
                 184 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
@@ -335,6 +429,17 @@ impl Frame {
                         descriptor: method.descriptor,
                         args: args,
                     });
+                }
+                // new
+                187 => {
+                    let index = try!(Self::next_opcode_entry_u2(code_position,
+                                                                &self.code_attribute));
+
+                    let class = try!(ConstantPoolItem::retrieve_class_info(index, constant_pool));
+                    let class_name = try!(ConstantPoolItem::retrieve_utf8_info(class.name_index,
+                                                                               constant_pool));
+
+                    return Ok(StepAction::AllocateClass(class_name));
                 }
                 val @ _ => return Err(StepError::UnknownOpcode(val)),
             }
@@ -374,8 +479,12 @@ impl Frame {
     }
 
     fn determine_number_of_arguments(descriptor: &Rc<Utf8Info>) -> usize {
-        let argument = DESCRIPTOR_REGEX.captures(&descriptor)
-            .expect("Couldn't find any arguments in descriptor!")
+        let maybe_captures = DESCRIPTOR_REGEX.captures(&descriptor);
+        if maybe_captures.is_none() {
+            return 0;
+        }
+
+        let argument = maybe_captures.unwrap()
             .name("arguments")
             .unwrap();
 
