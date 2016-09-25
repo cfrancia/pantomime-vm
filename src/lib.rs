@@ -85,12 +85,12 @@ impl VirtualMachine {
                                 .expect("Unable to find class");
 
                             self.data_store.register_class(class_name);
-
-                            let init_method = class.maybe_resolve_method("<clinit>")
-                                .expect("Cannot find <clinit> for class");
-
                             stack.push(frame);
-                            stack.push(Frame::new(class, init_method, vec![]));
+
+                            let init_method = class.maybe_resolve_method("<clinit>");
+                            if init_method.is_some() {
+                                stack.push(Frame::new(class, init_method.unwrap(), vec![]));
+                            }
                         }
                         StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
@@ -101,6 +101,7 @@ impl VirtualMachine {
                             let class = self.loader
                                 .resolve_class(&class_name)
                                 .expect("Unable to find class");
+
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 

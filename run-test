@@ -25,7 +25,7 @@ javac -d $TMP_DIR $JAVA_FILE_PATH || (echo 'Unable to compile class'; exit 1);
 
 echo "Running test [$CLASS_NAME]"
 
-cargo run -q $TMP_DIR/$CLASS_FILE_NAME $CLASS_NAME | grep "OUT:" > $TMP_DIR/$VM_OUT
+cargo run -q $(ls $TMP_DIR/*.class) $CLASS_NAME | grep "OUT:" > $TMP_DIR/$VM_OUT
 
 diff -q $TMP_DIR/$VM_OUT $EXPECTED_FILE > /dev/null
 
