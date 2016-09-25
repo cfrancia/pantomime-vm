@@ -10,7 +10,7 @@ use frame::{Frame, StepAction, StepError, JavaType};
 use loader::BaseClassLoader;
 
 use pantomime_parser::{ClassFile, ParserError};
-use pantomime_parser::components::{AccessFlags, Method, Utf8Info};
+use pantomime_parser::components::{AccessFlags, Field, Method, Utf8Info};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,12 +19,31 @@ use std::rc::Rc;
 mod frame;
 mod loader;
 
+macro_rules! resolve_class {
+    ($loader:ident$(.$additional_ident:ident)*, $class_name:ident) =>
+    {
+        $loader$(.$additional_ident)*
+            .resolve_class(&$class_name)
+            .expect("Unable to find class")
+    }
+}
+
 pub type VirtualMachineResult<T> = Result<T, VirtualMachineError>;
 
 #[derive(Debug)]
 pub enum VirtualMachineError {
     InvalidClassFile(ParserError),
     ClassNotFound(String),
+}
+
+pub type DataStoreResult<T> = Result<T, DataStoreError>;
+
+#[derive(Debug)]
+pub enum DataStoreError {
+    InvalidPointer(u64),
+    UninitializedClass(String),
+    StaticFieldNotFound(String),
+    FieldNotFound(String),
 }
 
 impl From<ParserError> for VirtualMachineError {
@@ -70,6 +89,10 @@ impl VirtualMachine {
                 break;
             }
 
+            if stack.len() > 255 {
+                panic!("Stack overflow");
+            }
+
             let mut frame = stack.pop().unwrap();
 
             match frame.step(&mut self.data_store) {
@@ -85,10 +108,7 @@ impl VirtualMachine {
                         }
                         StepAction::InitializeClass(class_name) => {
                             debug!("Initializing class: {}", class_name.to_string());
-
-                            let class = self.loader
-                                .resolve_class(&class_name)
-                                .expect("Unable to find class");
+                            let class = resolve_class!(self.loader, class_name);
 
                             stack.push(frame);
                             Self::initialize_class(class_name,
@@ -98,10 +118,7 @@ impl VirtualMachine {
                         }
                         StepAction::AllocateClass(class_name) => {
                             debug!("Allocating class: {}", class_name.to_string());
-
-                            let class = self.loader
-                                .resolve_class(&class_name)
-                                .expect("Unable to find class");
+                            let class = resolve_class!(self.loader, class_name);
 
                             if !self.data_store.has_class_statics(&class_name) {
                                 Self::initialize_class(class_name,
@@ -115,7 +132,8 @@ impl VirtualMachine {
 
                             stack.push(frame);
                         }
-                        StepAction::InvokeVirtualMethod { class_name, name, descriptor, args } => {
+                        StepAction::InvokeVirtualMethod { class_name, name, descriptor, args } |
+                        StepAction::InvokeSpecialMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking virtual method: {}#{}({})",
                                    class_name.to_string(),
                                    name.to_string(),
@@ -123,31 +141,14 @@ impl VirtualMachine {
 
                             let class = self.loader
                                 .resolve_class(&class_name)
-                                .or(self.loader.load_class(&class_name))
+                                .or_else(|_| self.loader.load_class(&class_name))
                                 .expect("Unable to find class");
 
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
                             stack.push(frame);
-                            Self::call_static_method(class, method, args, &mut stack);
-                        }
-                        StepAction::InvokeSpecialMethod { class_name, name, descriptor, args } => {
-                            debug!("Invoking special method: {}#{}({})",
-                                   class_name.to_string(),
-                                   name.to_string(),
-                                   descriptor.to_string());
-
-                            let class = self.loader
-                                .resolve_class(&class_name)
-                                .or(self.loader.load_class(&class_name))
-                                .expect("Unable to find class");
-
-                            let method = class.maybe_resolve_method(&**name)
-                                .expect("Unable to find method");
-
-                            stack.push(frame);
-                            Self::call_static_method(class, method, args, &mut stack);
+                            stack.push(Frame::new(class, method, args));
                         }
                         StepAction::InvokeStaticMethod { class_name, name, descriptor, args } => {
                             debug!("Invoking static method: {}#{}({})",
@@ -155,10 +156,7 @@ impl VirtualMachine {
                                    name.to_string(),
                                    descriptor.to_string());
 
-                            let class = self.loader
-                                .resolve_class(&class_name)
-                                .expect("Unable to find class");
-
+                            let class = resolve_class!(self.loader, class_name);
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
@@ -190,6 +188,9 @@ impl VirtualMachine {
         match error {
             StepError::Parser(val) => {
                 panic!("Parser error: {:?}", val);
+            }
+            StepError::DataStore(val) => {
+                panic!("Data store error: {:?}", val);
             }
             StepError::CodeIndexOutOfBounds(val) => {
                 panic!("Code index out of bounds: {:?}", val);
@@ -268,11 +269,67 @@ impl ObjectHeap {
     pub fn allocate_class(&mut self, class: &Rc<ClassFile>) -> u64 {
         let pointer = self.current_pointer;
 
-        let object = AllocatedObject::new();
+        let mut object = AllocatedObject::new();
+
+        let instance_fields: Vec<&Rc<Field>> = class.fields
+            .iter()
+            .filter(|val| !AccessFlags::is_static(val.access_flags))
+            .collect();
+
+        for instance_field in instance_fields {
+            let default_value = match instance_field.descriptor.as_str().chars().next().unwrap() {
+                'I' => JavaType::Int { value: 0 },
+                'L' => JavaType::Null,
+                d @ _ => panic!("Unexpected field type: {}", d),
+            };
+
+            object.instance_variables.insert(instance_field.name.clone(), default_value);
+        }
+
         self.objects.insert(pointer, object);
 
         self.current_pointer += 1;
         pointer
+    }
+
+    pub fn get_mut(&mut self, pointer: &JavaType) -> DataStoreResult<&mut AllocatedObject> {
+        let pointer_value = Self::resolve_pointer(pointer);
+        return match self.objects.get_mut(&pointer_value) {
+            Some(val) => Ok(val),
+            None => Err(DataStoreError::InvalidPointer(pointer_value)),
+        };
+    }
+
+    pub fn get(&self, pointer: &JavaType) -> DataStoreResult<&AllocatedObject> {
+        let pointer_value = Self::resolve_pointer(pointer);
+        return match self.objects.get(&pointer_value) {
+            Some(val) => Ok(val),
+            None => Err(DataStoreError::InvalidPointer(pointer_value)),
+        };
+    }
+
+    pub fn get_field(&self,
+                     pointer: &JavaType,
+                     field_name: &Rc<Utf8Info>)
+                     -> DataStoreResult<&JavaType> {
+        let object = try!(self.get(pointer));
+        object.instance_variables
+            .get(field_name)
+            .map(|val| Ok(val))
+            .unwrap_or_else(|| Err(DataStoreError::FieldNotFound(field_name.to_string())))
+    }
+
+    pub fn set_field(&mut self, pointer: &JavaType, field_name: Rc<Utf8Info>, value: JavaType) {
+        let object = self.get_mut(pointer).expect("Unable to find instance");
+        object.instance_variables
+            .insert(field_name, value);
+    }
+
+    fn resolve_pointer(pointer: &JavaType) -> u64 {
+        match pointer {
+            &JavaType::Reference { value } => value,
+            item @ _ => panic!("Unexpected JavaType: {}", item.to_friendly_name()),
+        }
     }
 }
 
@@ -325,12 +382,15 @@ impl CommonDataStore {
     pub fn get_class_static(&self,
                             class_name: &Rc<Utf8Info>,
                             field_name: &Rc<Utf8Info>)
-                            -> &JavaType {
-        self.class_statics
-            .get(class_name)
-            .expect("Unable to find initialized class statics")
-            .static_fields
-            .get(field_name)
-            .expect("Unable to find static field on class")
+                            -> DataStoreResult<&JavaType> {
+        let static_class = match self.class_statics.get(class_name) {
+            Some(val) => val,
+            None => return Err(DataStoreError::UninitializedClass(class_name.to_string())),
+        };
+
+        return match static_class.static_fields.get(field_name) {
+            Some(val) => Ok(val),
+            None => Err(DataStoreError::StaticFieldNotFound(field_name.to_string())),
+        };
     }
 }

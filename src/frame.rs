@@ -1,5 +1,5 @@
 
-use super::CommonDataStore;
+use super::{CommonDataStore, DataStoreError};
 
 use pantomime_parser::primitives::{U1, U2};
 
@@ -25,6 +25,16 @@ macro_rules! retrieve_and_advance {
             };
 
             *temp_var as U2
+        }
+    }
+}
+
+macro_rules! pop_operand {
+    ($operand_stack:ident$(.$additional_ident:ident)*) => {
+        {
+            $operand_stack$(.$additional_ident)*
+                .pop()
+                .expect("Operand stack was unexpectedly empty")
         }
     }
 }
@@ -90,11 +100,18 @@ pub enum StepError {
     UnexpectedConstantPoolItem(&'static str),
     UnknownOpcode(U1),
     UnexpectedJavaType(&'static str),
+    DataStore(DataStoreError),
 }
 
 impl From<ParserError> for StepError {
     fn from(error: ParserError) -> StepError {
         StepError::Parser(error)
+    }
+}
+
+impl From<DataStoreError> for StepError {
+    fn from(error: DataStoreError) -> StepError {
+        StepError::DataStore(error)
     }
 }
 
@@ -105,6 +122,7 @@ pub enum JavaType {
     Int { value: i32 },
     Long { value: i64 },
     Reference { value: u64 },
+    Null,
     Filler,
     Empty,
 }
@@ -136,6 +154,7 @@ impl JavaType {
             &JavaType::Int { .. } => "Int",
             &JavaType::Long { .. } => "Long",
             &JavaType::Reference { .. } => "Reference",
+            &JavaType::Null { .. } => "Null",
             &JavaType::Filler { .. } => "Filler",
             &JavaType::Empty => "Empty",
         };
@@ -264,21 +283,13 @@ impl Frame {
                 // aload_1
                 43 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
                 // istore_1
-                60 => {
-                    self.variables[1] =
-                        self.operand_stack.pop().expect("Operand stack was unexpectedly empty")
-                }
+                60 => self.variables[1] = pop_operand!(self.operand_stack),
                 // astore_1
-                76 => {
-                    self.variables.insert(1,
-                                          self.operand_stack
-                                              .pop()
-                                              .expect("Operand stack was unexpectedly empty"))
-                }
+                76 => self.variables.insert(1, pop_operand!(self.operand_stack)),
                 // dup
                 89 => {
-                    let value =
-                        self.operand_stack.pop().expect("Operand stack was unexpectedly empty");
+                    let value = pop_operand!(self.operand_stack);
+
                     self.operand_stack.push(value.clone());
                     self.operand_stack.push(value);
                 }
@@ -319,15 +330,11 @@ impl Frame {
                     self.operand_stack.push(JavaType::Byte { value: int_val as i8 });
                 }
                 // ireturn | areturn
-                172 | 176 => {
-                    return Ok(StepAction::ReturnValue(self.operand_stack
-                        .pop()
-                        .expect("Operand stack was unexpectedly empty")))
-                }
+                172 | 176 => return Ok(StepAction::ReturnValue(pop_operand!(self.operand_stack))),
                 // return
                 177 => return Ok(StepAction::EndOfMethod),
-                // getstatic
-                178 => {
+                // getstatic | putstatic
+                178 | 179 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
                     let field = try!(Resolver::resolve_field_info(index, constant_pool));
@@ -337,25 +344,44 @@ impl Frame {
                         return Ok(StepAction::InitializeClass(field.class_name));
                     }
 
-                    let field_value = data_store.get_class_static(&field.class_name, &field.name);
-                    self.operand_stack.push(field_value.clone());
+                    match *opcode {
+                        178 => {
+                            let field_value =
+                                try!(data_store.get_class_static(&field.class_name, &field.name));
+                            self.operand_stack.push(field_value.clone());
+                        }
+                        179 => {
+                            data_store.set_class_static(&field.class_name,
+                                                        field.name,
+                                                        pop_operand!(self.operand_stack));
+                        }
+                        _ => unreachable!(),
+                    }
+
                 }
-                // putstatic
-                179 => {
+                // getfield | putfield
+                180 | 181 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
                     let field = try!(Resolver::resolve_field_info(index, constant_pool));
 
-                    if !data_store.has_class_statics(&field.class_name) {
-                        code_position.reverse(3);
-                        return Ok(StepAction::InitializeClass(field.class_name));
+                    match *opcode {
+                        180 => {
+                            let reference = pop_operand!(self.operand_stack);
+                            let value = try!(data_store.heap().get_field(&reference, &field.name))
+                                .clone();
+                            self.operand_stack.push(value);
+                        }
+                        181 => {
+                            let value = pop_operand!(self.operand_stack);
+                            let reference = pop_operand!(self.operand_stack);
+                            data_store.heap().set_field(&reference, field.name, value);
+                        }
+                        _ => unreachable!(),
                     }
-
-                    let value = self.operand_stack.pop().expect("Expected value on operand stack");
-                    data_store.set_class_static(&field.class_name, field.name, value);
                 }
-                // invokevirtual
-                182 => {
+                // invokevirtual | invokespecial
+                182 | 183 => {
                     let index = try!(Self::next_opcode_entry_u2(code_position,
                                                                 &self.code_attribute));
                     let method = try!(Resolver::resolve_method_info(index, constant_pool));
@@ -364,47 +390,29 @@ impl Frame {
                     let mut argument_count =
                         Self::determine_number_of_arguments(&method.descriptor);
                     argument_count += 1;
-
                     debug!("Passing <{}> arguments", argument_count);
 
-                    let mut args = vec![];
-                    for _ in 0..argument_count {
-                        args.push(self.operand_stack
-                            .pop()
-                            .expect("Expected value on operand stack"));
-                    }
+                    let args = Self::build_arguments(argument_count, &mut self.operand_stack);
 
-
-                    return Ok(StepAction::InvokeVirtualMethod {
-                        class_name: method.class_name,
-                        name: method.name,
-                        descriptor: method.descriptor,
-                        args: args,
-                    });
-                }
-                // invokespecial
-                183 => {
-                    let index = try!(Self::next_opcode_entry_u2(code_position,
-                                                                &self.code_attribute));
-                    let method = try!(Resolver::resolve_method_info(index, constant_pool));
-
-                    let argument_count = Self::determine_number_of_arguments(&method.descriptor);
-                    debug!("Passing <{}> arguments", argument_count);
-
-                    let mut args = vec![];
-                    for _ in 0..argument_count {
-                        args.push(self.operand_stack
-                            .pop()
-                            .expect("Expected value on operand stack"));
-                    }
-
-
-                    return Ok(StepAction::InvokeSpecialMethod {
-                        class_name: method.class_name,
-                        name: method.name,
-                        descriptor: method.descriptor,
-                        args: args,
-                    });
+                    return match *opcode {
+                        182 => {
+                            Ok(StepAction::InvokeVirtualMethod {
+                                class_name: method.class_name,
+                                name: method.name,
+                                descriptor: method.descriptor,
+                                args: args,
+                            })
+                        }
+                        183 => {
+                            Ok(StepAction::InvokeSpecialMethod {
+                                class_name: method.class_name,
+                                name: method.name,
+                                descriptor: method.descriptor,
+                                args: args,
+                            })
+                        }
+                        _ => unreachable!(),
+                    };
                 }
                 // invokestatic
                 184 => {
@@ -415,13 +423,8 @@ impl Frame {
                     let argument_count = Self::determine_number_of_arguments(&method.descriptor);
                     debug!("Passing <{}> arguments", argument_count);
 
-                    let mut args = vec![];
-                    for _ in 0..argument_count {
-                        args.push(self.operand_stack
-                            .pop()
-                            .expect("Expected value on operand stack"));
-                    }
-
+                    let args = Self::build_static_arguments(argument_count,
+                                                            &mut self.operand_stack);
 
                     return Ok(StepAction::InvokeStaticMethod {
                         class_name: method.class_name,
@@ -515,6 +518,22 @@ impl Frame {
         }
 
         argument_count
+    }
+
+    fn build_arguments(count: usize, operand_stack: &mut Vec<JavaType>) -> Vec<JavaType> {
+        let mut args = vec![];
+        for _ in 0..count {
+            args.insert(0, pop_operand!(operand_stack));
+        }
+        args
+    }
+
+    fn build_static_arguments(count: usize, operand_stack: &mut Vec<JavaType>) -> Vec<JavaType> {
+        let mut args = vec![];
+        for _ in 0..count {
+            args.push(pop_operand!(operand_stack));
+        }
+        args
     }
 }
 
