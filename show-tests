@@ -1,0 +1,11 @@
+#! /bin/bash
+set -e
+
+ROOT_TEST_DIR=test-resources/test-cases
+
+for suite in $ROOT_TEST_DIR/*; do
+    echo "Suite [`basename $suite`]"
+    for case in $suite/*.java; do
+        echo -e "\tTest [`basename -s .java $case`]"
+    done
+done
