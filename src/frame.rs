@@ -40,7 +40,7 @@ macro_rules! pop_operand {
 }
 
 struct Codepoint {
-    position: usize,
+    position: isize,
 }
 
 impl Codepoint {
@@ -51,11 +51,15 @@ impl Codepoint {
     pub fn get_and_increment(&mut self) -> usize {
         let current_position = self.position;
         self.position += 1;
-        current_position
+        current_position as usize
     }
 
     pub fn reverse(&mut self, steps: usize) {
-        self.position -= steps;
+        self.position -= steps as isize;
+    }
+
+    pub fn offset(&mut self, offset: isize) {
+        self.position += offset;
     }
 
     pub fn current(&self) -> usize {
@@ -87,7 +91,7 @@ pub enum StepAction {
     },
     InitializeClass(Rc<Utf8Info>),
     AllocateClass(Rc<Utf8Info>),
-    Continue,
+    AllocateArray(i32),
     ReturnValue(JavaType),
     EndOfMethod,
 }
@@ -145,6 +149,23 @@ macro_rules! generate_javatype_pop_method {
     }
 }
 
+macro_rules! generate_javatype_retrieval_method {
+    ($variant_name:ident, $return_type:ident, $method_name:ident) => {
+        pub fn $method_name(index: usize, item_vec: &Vec<JavaType>) -> StepResult<$return_type> {
+            return match item_vec.get(index) {
+                Some(item) => {
+                    match item {
+                        &JavaType::$variant_name { value } => Ok(value),
+                        unexpected @ _ => {
+                            Err(StepError::UnexpectedJavaType(unexpected.to_friendly_name()))
+                        }
+                    }
+                }
+                None => Err(StepError::UnexpectedEmptyVec),
+            };
+        }
+    }
+}
 
 impl JavaType {
     pub fn to_friendly_name(&self) -> &'static str {
@@ -168,6 +189,9 @@ impl JavaType {
 
     generate_javatype_pop_method!(Int, i32, pop_int);
     generate_javatype_pop_method!(Long, i64, pop_long);
+
+    generate_javatype_retrieval_method!(Int, i32, retrieve_int);
+    generate_javatype_retrieval_method!(Long, i64, retrieve_long);
 }
 
 pub struct Frame {
@@ -215,14 +239,20 @@ impl Frame {
         let constant_pool = &self.classfile.constant_pool;
         let ref mut code_position = self.code_position;
 
-        if let Some(opcode) = self.code_attribute.code.get(code_position.current()) {
+        while let Some(opcode) = self.code_attribute.code.get(code_position.current()) {
             code_position.get_and_increment();
 
             match *opcode {
+                // iconst_0
+                3 => self.operand_stack.push(JavaType::Int { value: 0 }),
+                // iconst_1
+                4 => self.operand_stack.push(JavaType::Int { value: 1 }),
                 // iconst_2
                 5 => self.operand_stack.push(JavaType::Int { value: 2 }),
                 // iconst_3
                 6 => self.operand_stack.push(JavaType::Int { value: 3 }),
+                // iconst_4
+                7 => self.operand_stack.push(JavaType::Int { value: 4 }),
                 // iconst_5
                 8 => self.operand_stack.push(JavaType::Int { value: 5 }),
                 // bipush
@@ -274,6 +304,8 @@ impl Frame {
                 26 => self.operand_stack.push(JavaType::load(0, &mut self.variables)),
                 // iload_1
                 27 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
+                // iload_2
+                28 => self.operand_stack.push(JavaType::load(2, &mut self.variables)),
                 // lload_0 (the first value is filler)
                 30 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
                 // lload_2 (the first value is filler)
@@ -282,10 +314,30 @@ impl Frame {
                 42 => self.operand_stack.push(JavaType::load(0, &mut self.variables)),
                 // aload_1
                 43 => self.operand_stack.push(JavaType::load(1, &mut self.variables)),
+                // iaload
+                46 => {
+                    let index = try!(JavaType::pop_int(&mut self.operand_stack));
+                    let array_ref = pop_operand!(self.operand_stack);
+
+                    let array = try!(data_store.heap().get_array(&array_ref));
+                    self.operand_stack.push(array[index].clone());
+                }
                 // istore_1
                 60 => self.variables[1] = pop_operand!(self.operand_stack),
+                // istore_2
+                61 => self.variables[2] = pop_operand!(self.operand_stack),
                 // astore_1
                 76 => self.variables.insert(1, pop_operand!(self.operand_stack)),
+                // iastore
+                79 => {
+                    let value = pop_operand!(self.operand_stack);
+                    let index = try!(JavaType::pop_int(&mut self.operand_stack));
+
+                    let array_ref = pop_operand!(self.operand_stack);
+
+                    let array = try!(data_store.heap().get_array_mut(&array_ref));
+                    array[index] = value;
+                }
                 // dup
                 89 => {
                     let value = pop_operand!(self.operand_stack);
@@ -324,10 +376,39 @@ impl Frame {
                     self.operand_stack.push(JavaType::Long { value: result });
                     self.operand_stack.push(JavaType::Filler);
                 }
+                // iinc
+                132 => {
+                    let index = try!(Self::next_opcode_entry_u1(code_position,
+                                                                &self.code_attribute));
+                    let const_value = try!(Self::next_opcode_entry_u1(code_position,
+                                                                      &self.code_attribute));
+
+                    let index = index as usize;
+                    let const_value = const_value as i32;
+
+                    let current_value = try!(JavaType::retrieve_int(index, &self.variables));
+                    self.variables[index] = JavaType::Int { value: current_value + const_value };
+                }
                 // i2b
                 145 => {
                     let int_val = try!(JavaType::pop_int(&mut self.operand_stack));
                     self.operand_stack.push(JavaType::Byte { value: int_val as i8 });
+                }
+                // if_icmpge
+                162 => {
+                    let value_2 = try!(JavaType::pop_int(&mut self.operand_stack));
+                    let value_1 = try!(JavaType::pop_int(&mut self.operand_stack));
+
+                    let offset = try!(Self::calculate_offset(code_position, &self.code_attribute));
+
+                    if value_1 >= value_2 {
+                        code_position.offset(offset);
+                    }
+                }
+                // goto
+                167 => {
+                    let offset = try!(Self::calculate_offset(code_position, &self.code_attribute));
+                    code_position.offset(offset);
                 }
                 // ireturn | areturn
                 172 | 176 => return Ok(StepAction::ReturnValue(pop_operand!(self.operand_stack))),
@@ -444,13 +525,26 @@ impl Frame {
 
                     return Ok(StepAction::AllocateClass(class_name));
                 }
+                // newarray
+                188 => {
+                    let count = try!(JavaType::pop_int(&mut self.operand_stack));
+                    // This contains the type of the array. We'll ignore it for the moment
+                    let _ = try!(Self::next_opcode_entry_u1(code_position, &self.code_attribute));
+
+                    return Ok(StepAction::AllocateArray(count));
+                }
+                // arraylength
+                190 => {
+                    let array_ref = pop_operand!(self.operand_stack);
+                    let array = try!(data_store.heap().get_array(&array_ref));
+
+                    self.operand_stack.push(JavaType::Int { value: array.count });
+                }
                 val @ _ => return Err(StepError::UnknownOpcode(val)),
             }
-
-            return Ok(StepAction::Continue);
         }
 
-        Ok(StepAction::EndOfMethod)
+        Err(StepError::CodeIndexOutOfBounds(code_position.current() - 1))
     }
 
     fn next_opcode_entry_u1(code_position: &mut Codepoint,
@@ -468,6 +562,28 @@ impl Frame {
 
         let index = (index_one << 8) | index_two;
         Ok(index)
+    }
+
+    fn next_opcode_entry_i16(code_position: &mut Codepoint,
+                             code_attribute: &Rc<CodeAttribute>)
+                             -> StepResult<i16> {
+        let index_one = retrieve_and_advance!(code_position, code_attribute.code) as i16;
+        let index_two = retrieve_and_advance!(code_position, code_attribute.code) as i16;
+
+        let index = (index_one << 8) | index_two;
+        Ok(index)
+    }
+
+    fn calculate_offset(code_position: &mut Codepoint,
+                        code_attribute: &Rc<CodeAttribute>)
+                        -> StepResult<isize> {
+        let mut offset = try!(Self::next_opcode_entry_i16(code_position, code_attribute));
+
+        // The offset is from this opcode, so we need to move it back an
+        // additional three steps.
+        offset -= 3;
+
+        Ok(offset as isize)
     }
 
     fn resolve_code_attribute(attributes: &Vec<Rc<Attribute>>) -> Option<Rc<CodeAttribute>> {

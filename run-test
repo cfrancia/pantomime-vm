@@ -1,8 +1,13 @@
 #! /bin/bash
 
-if [ -z $1 ]; then
-    echo 'run-test [JAVA_FILE] [EXPECTED_OUTPUT]'
+if [ -z $1 ] || [ -z $2 ]; then
+    echo 'run-test [SUITE] [TEST_NAME]'
     exit 1;
+fi
+
+if [ ! -z $3 ] && [ $3 == "DEBUG" ]; then
+    echo "Debug output enabled";
+    DEBUG=true;
 fi
 
 if [ -z $EXTRACTED_JAVA_RT_PATH ]; then
@@ -10,18 +15,20 @@ if [ -z $EXTRACTED_JAVA_RT_PATH ]; then
     exit 1;
 fi
 
-VM_OUT=vm.out
+BASE_TEST_PATH=test-resources/test-cases;
+VM_OUT=vm.out;
+PRINTLN_OUT=println.out;
 
-JAVA_FILE_PATH=$1;
+JAVA_FILE_PATH=$BASE_TEST_PATH/$1/$2.java;
 
-EXPECTED_FILE=$JAVA_FILE_PATH.expected
-BUNDLE_DIR=$JAVA_FILE_PATH.bundle
+EXPECTED_FILE=$JAVA_FILE_PATH.expected;
+BUNDLE_DIR=$JAVA_FILE_PATH.bundle;
 
-CLASS_NAME=`basename -s .java $JAVA_FILE_PATH`
-CLASS_FILE_NAME=$CLASS_NAME.class
+CLASS_NAME=`basename -s .java $JAVA_FILE_PATH`;
+CLASS_FILE_NAME=$CLASS_NAME.class;
 
 if [ ! -f $JAVA_FILE_PATH ]; then
-    echo "No file at <$JAVA_FILE>";
+    echo "No file at <$JAVA_FILE_PATH>";
     exit 1;
 fi
 
@@ -35,18 +42,27 @@ else
 fi
 
 echo "Running test [$CLASS_NAME]"
-cargo run -q $EXTRACTED_JAVA_RT_PATH $(ls $TMP_DIR/*.class) $CLASS_NAME | grep "OUT:" > $TMP_DIR/$VM_OUT
+cargo run -q $EXTRACTED_JAVA_RT_PATH $(ls $TMP_DIR/*.class) $CLASS_NAME > $TMP_DIR/$VM_OUT;
 
-diff -q $TMP_DIR/$VM_OUT $EXPECTED_FILE > /dev/null
+cat $TMP_DIR/$VM_OUT | grep "OUT: " > $TMP_DIR/$PRINTLN_OUT;
+
+diff -q $TMP_DIR/$PRINTLN_OUT $EXPECTED_FILE > /dev/null;
 
 if [[ $? -eq 0 ]]; then
     echo -e '\033[32mPASSED\033[0m';
+
+    if [ ! -z $DEBUG ]; then
+        cat $TMP_DIR/$VM_OUT;
+    fi
 else
     echo -e '\033[31mFAILED\033[0m';
+    echo "--VM Output--";
+    cat $TMP_DIR/$VM_OUT;
+
     echo "Classfile: $TMP_DIR/$CLASS_FILE_NAME"
     echo '--Expected--';
     cat $EXPECTED_FILE;
 
     echo '--Actual--';
-    cat $TMP_DIR/$VM_OUT;
+    cat $TMP_DIR/$PRINTLN_OUT;
 fi

@@ -6,6 +6,6 @@ ROOT_TEST_DIR=test-resources/test-cases
 for suite in $ROOT_TEST_DIR/*; do
     echo "Running suite [`basename $suite`]..."
     for case in $suite/*.java; do
-        ./run-test $case
+        ./run-test `basename $suite` `basename -s .java $case`
     done
 done

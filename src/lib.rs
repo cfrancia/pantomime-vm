@@ -13,6 +13,7 @@ use pantomime_parser::{ClassFile, ParserError};
 use pantomime_parser::components::{AccessFlags, Field, Method, Utf8Info};
 
 use std::collections::HashMap;
+use std::ops::{Index, IndexMut};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -41,6 +42,7 @@ pub type DataStoreResult<T> = Result<T, DataStoreError>;
 #[derive(Debug)]
 pub enum DataStoreError {
     InvalidPointer(u64),
+    UnexpectedHeapType,
     UninitializedClass(String),
     StaticFieldNotFound(String),
     FieldNotFound(String),
@@ -98,7 +100,6 @@ impl VirtualMachine {
             match frame.step(&mut self.data_store) {
                 Ok(action) => {
                     match action {
-                        StepAction::Continue => stack.push(frame),
                         StepAction::EndOfMethod => debug!("Reached end of method"),
                         StepAction::ReturnValue(value) => {
                             let mut previous_frame = stack.pop()
@@ -127,7 +128,15 @@ impl VirtualMachine {
                                                        &mut stack);
                             }
 
-                            let pointer = self.data_store.heap().allocate_class(&class);
+                            let pointer = self.data_store.heap().allocate_object(&class);
+                            frame.push_operand_stack_value(JavaType::Reference { value: pointer });
+
+                            stack.push(frame);
+                        }
+                        StepAction::AllocateArray(count) => {
+                            debug!("Allocating array of size: {}", count);
+
+                            let pointer = self.data_store.heap().allocate_array(count);
                             frame.push_operand_stack_value(JavaType::Reference { value: pointer });
 
                             stack.push(frame);
@@ -255,7 +264,7 @@ impl ClassStaticInfo {
 
 pub struct ObjectHeap {
     current_pointer: u64,
-    objects: HashMap<u64, AllocatedObject>,
+    objects: HashMap<u64, HeapAllocation>,
 }
 
 impl ObjectHeap {
@@ -266,7 +275,7 @@ impl ObjectHeap {
         }
     }
 
-    pub fn allocate_class(&mut self, class: &Rc<ClassFile>) -> u64 {
+    pub fn allocate_object(&mut self, class: &Rc<ClassFile>) -> u64 {
         let pointer = self.current_pointer;
 
         let mut object = AllocatedObject::new();
@@ -286,13 +295,21 @@ impl ObjectHeap {
             object.instance_variables.insert(instance_field.name.clone(), default_value);
         }
 
-        self.objects.insert(pointer, object);
+        self.objects.insert(pointer, HeapAllocation::Object(object));
 
         self.current_pointer += 1;
         pointer
     }
 
-    pub fn get_mut(&mut self, pointer: &JavaType) -> DataStoreResult<&mut AllocatedObject> {
+    pub fn allocate_array(&mut self, count: i32) -> u64 {
+        let pointer = self.current_pointer;
+        self.objects.insert(pointer, HeapAllocation::Array(AllocatedArray::new(count)));
+
+        self.current_pointer += 1;
+        pointer
+    }
+
+    pub fn get_mut(&mut self, pointer: &JavaType) -> DataStoreResult<&mut HeapAllocation> {
         let pointer_value = Self::resolve_pointer(pointer);
         return match self.objects.get_mut(&pointer_value) {
             Some(val) => Ok(val),
@@ -300,7 +317,21 @@ impl ObjectHeap {
         };
     }
 
-    pub fn get(&self, pointer: &JavaType) -> DataStoreResult<&AllocatedObject> {
+    pub fn get_object_mut(&mut self, pointer: &JavaType) -> DataStoreResult<&mut AllocatedObject> {
+        match try!(self.get_mut(pointer)) {
+            &mut HeapAllocation::Object(ref mut object) => Ok(object),
+            _ => Err(DataStoreError::UnexpectedHeapType),
+        }
+    }
+
+    pub fn get_array_mut(&mut self, pointer: &JavaType) -> DataStoreResult<&mut AllocatedArray> {
+        match try!(self.get_mut(pointer)) {
+            &mut HeapAllocation::Array(ref mut array) => Ok(array),
+            _ => Err(DataStoreError::UnexpectedHeapType),
+        }
+    }
+
+    pub fn get(&self, pointer: &JavaType) -> DataStoreResult<&HeapAllocation> {
         let pointer_value = Self::resolve_pointer(pointer);
         return match self.objects.get(&pointer_value) {
             Some(val) => Ok(val),
@@ -308,11 +339,25 @@ impl ObjectHeap {
         };
     }
 
+    pub fn get_object(&self, pointer: &JavaType) -> DataStoreResult<&AllocatedObject> {
+        match try!(self.get(pointer)) {
+            &HeapAllocation::Object(ref object) => Ok(object),
+            _ => Err(DataStoreError::UnexpectedHeapType),
+        }
+    }
+
+    pub fn get_array(&self, pointer: &JavaType) -> DataStoreResult<&AllocatedArray> {
+        match try!(self.get(pointer)) {
+            &HeapAllocation::Array(ref array) => Ok(array),
+            _ => Err(DataStoreError::UnexpectedHeapType),
+        }
+    }
+
     pub fn get_field(&self,
                      pointer: &JavaType,
                      field_name: &Rc<Utf8Info>)
                      -> DataStoreResult<&JavaType> {
-        let object = try!(self.get(pointer));
+        let object = try!(self.get_object(pointer));
         object.instance_variables
             .get(field_name)
             .map(|val| Ok(val))
@@ -320,9 +365,8 @@ impl ObjectHeap {
     }
 
     pub fn set_field(&mut self, pointer: &JavaType, field_name: Rc<Utf8Info>, value: JavaType) {
-        let object = self.get_mut(pointer).expect("Unable to find instance");
-        object.instance_variables
-            .insert(field_name, value);
+        let object = self.get_object_mut(pointer).expect("Unable to find instance");
+        object.instance_variables.insert(field_name, value);
     }
 
     fn resolve_pointer(pointer: &JavaType) -> u64 {
@@ -333,6 +377,11 @@ impl ObjectHeap {
     }
 }
 
+pub enum HeapAllocation {
+    Object(AllocatedObject),
+    Array(AllocatedArray),
+}
+
 pub struct AllocatedObject {
     instance_variables: HashMap<Rc<Utf8Info>, JavaType>,
 }
@@ -340,6 +389,41 @@ pub struct AllocatedObject {
 impl AllocatedObject {
     pub fn new() -> AllocatedObject {
         AllocatedObject { instance_variables: HashMap::new() }
+    }
+}
+
+pub struct AllocatedArray {
+    pub count: i32,
+    pub store: Vec<JavaType>,
+}
+
+impl AllocatedArray {
+    pub fn new(count: i32) -> AllocatedArray {
+        let mut store = Vec::with_capacity(count as usize);
+
+        // TODO: This should be the default value of the type.
+        for _ in 0..count {
+            store.push(JavaType::Null);
+        }
+
+        AllocatedArray {
+            count: count,
+            store: store,
+        }
+    }
+}
+
+impl Index<i32> for AllocatedArray {
+    type Output = JavaType;
+
+    fn index(&self, _index: i32) -> &JavaType {
+        self.store.index(_index as usize)
+    }
+}
+
+impl IndexMut<i32> for AllocatedArray {
+    fn index_mut(&mut self, _index: i32) -> &mut JavaType {
+        self.store.index_mut(_index as usize)
     }
 }
 
