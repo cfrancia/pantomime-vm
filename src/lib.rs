@@ -29,6 +29,18 @@ macro_rules! resolve_class {
     }
 }
 
+macro_rules! load_class {
+    ($loader:ident$(.$additional_ident:ident)*, $class_name:ident) =>
+    {
+        $loader$(.$additional_ident)*
+            .resolve_class(&$class_name)
+            .or_else(|_| $loader$(.$additional_ident)*.load_class(&$class_name))
+            .expect("Unable to find class");
+    }
+}
+
+const STRING_CLASS: &'static str = "java/lang/String";
+
 pub type VirtualMachineResult<T> = Result<T, VirtualMachineError>;
 
 #[derive(Debug)]
@@ -117,6 +129,49 @@ impl VirtualMachine {
                                                    &mut self.data_store,
                                                    &mut stack);
                         }
+                        StepAction::AllocateString(contents) => {
+                            debug!("Allocating string: {}", contents);
+                            let class = load_class!(self.loader, STRING_CLASS);
+
+                            let value_array_pointer = self.data_store
+                                .heap()
+                                .allocate_array(contents.chars().count() as i32);
+                            {
+                                let mut value_array = self.data_store
+                                    .heap()
+                                    .get_array_mut(&JavaType::Reference {
+                                        value: value_array_pointer,
+                                    })
+                                    .expect("Unable to reference newly created Array");
+
+                                for (i, character) in contents.chars().enumerate() {
+                                    value_array.store[i] = JavaType::Char { value: character };
+                                }
+                            }
+
+                            let string_pointer = self.data_store.heap().allocate_object(&class);
+                            let mut string_object = self.data_store
+                                .heap()
+                                .get_object_mut(&JavaType::Reference { value: string_pointer })
+                                .expect("Unable to reference newly created String");
+
+                            // TODO: Work out a better way of manually referencing field names.
+                            let value_field = Rc::new(Utf8Info {
+                                tag: 0,
+                                length: 0,
+                                value: "value".to_string(),
+                            });
+                            string_object.instance_variables.insert(value_field,
+                                                                    JavaType::Reference {
+                                                                        value: value_array_pointer,
+                                                                    });
+
+                            frame.push_operand_stack_value(JavaType::Reference {
+                                value: string_pointer,
+                            });
+
+                            stack.push(frame);
+                        }
                         StepAction::AllocateClass(class_name) => {
                             debug!("Allocating class: {}", class_name.to_string());
                             let class = resolve_class!(self.loader, class_name);
@@ -148,11 +203,7 @@ impl VirtualMachine {
                                    name.to_string(),
                                    descriptor.to_string());
 
-                            let class = self.loader
-                                .resolve_class(&class_name)
-                                .or_else(|_| self.loader.load_class(&class_name))
-                                .expect("Unable to find class");
-
+                            let class = load_class!(self.loader, class_name);
                             let method = class.maybe_resolve_method(&**name)
                                 .expect("Unable to find method");
 
@@ -170,7 +221,11 @@ impl VirtualMachine {
                                 .expect("Unable to find method");
 
                             stack.push(frame);
-                            Self::call_static_method(class, method, args, &mut stack);
+                            Self::call_static_method(class,
+                                                     method,
+                                                     args,
+                                                     &self.data_store.heap(),
+                                                     &mut stack);
                         }
                     }
                 }
@@ -222,6 +277,7 @@ impl VirtualMachine {
     fn call_static_method(class: Rc<ClassFile>,
                           method: Rc<Method>,
                           args: Vec<JavaType>,
+                          heap: &ObjectHeap,
                           stack: &mut Vec<Frame>) {
         let mut args = args;
         {
@@ -233,10 +289,38 @@ impl VirtualMachine {
                 // TODO: Don't always assume it's going to be native println
                 // with a single argument
                 match args.pop().unwrap() {
-                    JavaType::String { index } => {
-                        let value =
-                            class.constant_pool_resolver().resolve_string_constant(index).unwrap();
-                        println!("OUT: {}", value);
+                    reference @ JavaType::Reference { .. } => {
+                        let object = heap.get_object(&reference)
+                            .expect("Unable to retrieve referenced object");
+                        if object.class_name != "java/lang/String" {
+                            panic!("Unexpected class provided to print: {}", object.class_name);
+                        }
+
+                        let value_field = Rc::new(Utf8Info {
+                            tag: 0,
+                            length: 0,
+                            value: "value".to_string(),
+                        });
+                        let value_reference = object.instance_variables
+                            .get(&value_field)
+                            .expect("Unable to retrieve array reference from String");
+
+                        let value_array = heap.get_array(&value_reference)
+                            .expect("Unable to retrieve referenced array");
+                        let mut string_value = String::new();
+
+                        for java_value in &value_array.store {
+                            match java_value {
+                                &JavaType::Char { value } => {
+                                    string_value.push(value);
+                                }
+                                java_type @ _ => {
+                                    panic!("Unexpected Java type: {}", java_type.to_friendly_name())
+                                }
+                            }
+                        }
+
+                        println!("OUT: {}", string_value);
                     }
                     JavaType::Int { value } => println!("OUT: {}", value),
                     JavaType::Byte { value } => println!("OUT: {}", value),
@@ -278,7 +362,11 @@ impl ObjectHeap {
     pub fn allocate_object(&mut self, class: &Rc<ClassFile>) -> u64 {
         let pointer = self.current_pointer;
 
-        let mut object = AllocatedObject::new();
+        let class_name = class.classname()
+            .expect("Unable to resolve provided class name")
+            .to_string();
+
+        let mut object = AllocatedObject::new(class_name);
 
         let instance_fields: Vec<&Rc<Field>> = class.fields
             .iter()
@@ -288,7 +376,7 @@ impl ObjectHeap {
         for instance_field in instance_fields {
             let default_value = match instance_field.descriptor.as_str().chars().next().unwrap() {
                 'I' => JavaType::Int { value: 0 },
-                'L' => JavaType::Null,
+                'L' | '[' => JavaType::Null,
                 d @ _ => panic!("Unexpected field type: {}", d),
             };
 
@@ -383,12 +471,16 @@ pub enum HeapAllocation {
 }
 
 pub struct AllocatedObject {
-    instance_variables: HashMap<Rc<Utf8Info>, JavaType>,
+    pub class_name: String,
+    pub instance_variables: HashMap<Rc<Utf8Info>, JavaType>,
 }
 
 impl AllocatedObject {
-    pub fn new() -> AllocatedObject {
-        AllocatedObject { instance_variables: HashMap::new() }
+    pub fn new(class_name: String) -> AllocatedObject {
+        AllocatedObject {
+            class_name: class_name,
+            instance_variables: HashMap::new(),
+        }
     }
 }
 

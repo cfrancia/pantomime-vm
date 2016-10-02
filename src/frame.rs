@@ -90,6 +90,7 @@ pub enum StepAction {
         args: Vec<JavaType>,
     },
     InitializeClass(Rc<Utf8Info>),
+    AllocateString(String),
     AllocateClass(Rc<Utf8Info>),
     AllocateArray(i32),
     ReturnValue(JavaType),
@@ -121,8 +122,8 @@ impl From<DataStoreError> for StepError {
 
 #[derive(Copy, Clone, Debug)]
 pub enum JavaType {
-    String { index: U2 },
     Byte { value: i8 },
+    Char { value: char },
     Int { value: i32 },
     Long { value: i64 },
     Reference { value: u64 },
@@ -170,8 +171,8 @@ macro_rules! generate_javatype_retrieval_method {
 impl JavaType {
     pub fn to_friendly_name(&self) -> &'static str {
         return match self {
-            &JavaType::String { .. } => "String",
             &JavaType::Byte { .. } => "Byte",
+            &JavaType::Char { .. } => "Char",
             &JavaType::Int { .. } => "Int",
             &JavaType::Long { .. } => "Long",
             &JavaType::Reference { .. } => "Reference",
@@ -267,7 +268,14 @@ impl Frame {
                                                                 &self.code_attribute));
                     let stack_val = match try!(ConstantPoolItem::retrieve_item(index as usize,
                                                                                constant_pool)) {
-                        &ConstantPoolItem::String(..) => JavaType::String { index: index },
+                        &ConstantPoolItem::String(..) => {
+                            let contents = self.classfile
+                                .constant_pool_resolver()
+                                .resolve_string_constant(index)
+                                .unwrap();
+
+                            return Ok(StepAction::AllocateString(contents));
+                        }
                         &ConstantPoolItem::Integer(ref info) => {
                             JavaType::Int { value: info.bytes as i32 }
                         }
